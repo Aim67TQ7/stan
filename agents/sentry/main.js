@@ -174,6 +174,7 @@ function startWebhookServer(handlers) {
       description: record.description || record.title || '',
       priority: record.priority || 'normal',
       assigned_to: assignedTo,
+      user_id: record.user_id || null,
       supabase_record: record,
       _source: 'supabase-webhook',
       _webhook_received: new Date().toISOString()

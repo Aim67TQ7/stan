@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { watch } from 'chokidar';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { createServer } from 'http';
+import cronParser from 'cron-parser';
 import path from 'path';
 
 const AGENT_NAME = 'clark';
@@ -13,7 +14,7 @@ const UPLOADS_DIR = path.join(AGENT_DIR, 'uploads');
 const TASK_FILE = path.join(AGENT_DIR, 'current-task.json');
 const STATUS_FILE = path.join(WORKSPACE, 'agent-status.json');
 
-const WRITABLE_TABLES = ['tasks', 'agent_status'];
+const WRITABLE_TABLES = ['tasks', 'agent_status', 'agent_activity', 'scheduled_tasks'];
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
@@ -72,8 +73,10 @@ async function loadSystemPrompt() {
   return await readFile(path.join('/app', 'AGENT.md'), 'utf-8');
 }
 
+// --- Core DB Operations ---
+
 async function queryTable(table, query) {
-  if (!supabase) return { error: 'Supabase credentials not configured. See TODO.md.' };
+  if (!supabase) return { error: 'Supabase credentials not configured.' };
 
   await log(`READ: ${table} — ${JSON.stringify(query)}`);
   let req = supabase.from(table).select(query.select || '*');
@@ -94,20 +97,24 @@ async function queryTable(table, query) {
   return { data, count: data.length };
 }
 
-async function writeToTasks(record) {
-  if (!supabase) return { error: 'Supabase credentials not configured. See TODO.md.' };
+async function writeToTable(table, record) {
+  if (!supabase) return { error: 'Supabase credentials not configured.' };
+  if (!WRITABLE_TABLES.includes(table)) {
+    await log(`WRITE DENIED: attempted write to '${table}'`);
+    return { error: `DENIED: Write access to '${table}' not permitted. Writable: ${WRITABLE_TABLES.join(', ')}` };
+  }
 
-  await log(`WRITE: tasks — ${JSON.stringify(record)}`);
-  const { data, error } = await supabase.from('tasks').upsert(record).select();
+  await log(`WRITE: ${table} — ${JSON.stringify(record).slice(0, 200)}`);
+  const { data, error } = await supabase.from(table).upsert(record).select();
   if (error) {
-    await log(`WRITE ERROR: ${error.message}`);
+    await log(`WRITE ERROR [${table}]: ${error.message}`);
     return { error: error.message };
   }
   return { data };
 }
 
 async function uploadFile(filepath, bucket) {
-  if (!supabase) return { error: 'Supabase credentials not configured. See TODO.md.' };
+  if (!supabase) return { error: 'Supabase credentials not configured.' };
 
   const filename = path.basename(filepath);
   const fileBuffer = await readFile(filepath);
@@ -123,7 +130,6 @@ async function uploadFile(filepath, bucket) {
     return { error: error.message };
   }
 
-  // Track upload locally
   const uploadRecord = { bucket, filename, path: data.path, uploaded_at: new Date().toISOString() };
   const trackFile = path.join(UPLOADS_DIR, `${Date.now()}-${filename}.json`);
   await mkdir(UPLOADS_DIR, { recursive: true });
@@ -131,6 +137,27 @@ async function uploadFile(filepath, bucket) {
 
   return { data };
 }
+
+// --- Activity Logging ---
+
+async function logActivity(agentName, action, details = {}, userId = null, taskId = null) {
+  if (!supabase) return;
+
+  const record = {
+    agent_name: agentName,
+    action,
+    details,
+    user_id: userId || null,
+    task_id: taskId || null
+  };
+
+  const { error } = await supabase.from('agent_activity').insert(record);
+  if (error) {
+    await log(`ACTIVITY LOG ERROR: ${error.message}`);
+  }
+}
+
+// --- Agent Status Sync ---
 
 async function syncAgentStatus(statusData) {
   if (!supabase) return;
@@ -185,6 +212,86 @@ function watchAgentStatus() {
   return watcher;
 }
 
+// --- Scheduled Tasks Scheduler ---
+
+function computeNextRun(cronExpression) {
+  try {
+    const interval = cronParser.parseExpression(cronExpression);
+    return interval.next().toISOString();
+  } catch {
+    return null;
+  }
+}
+
+async function pollScheduledTasks() {
+  if (!supabase) return;
+
+  try {
+    const now = new Date().toISOString();
+    const { data: dueTasks, error } = await supabase
+      .from('scheduled_tasks')
+      .select('*')
+      .eq('enabled', true)
+      .lte('next_run_at', now);
+
+    if (error) {
+      await log(`SCHEDULER ERROR: ${error.message}`);
+      return;
+    }
+
+    if (!dueTasks || dueTasks.length === 0) return;
+
+    await log(`Scheduler: ${dueTasks.length} due task(s)`);
+
+    for (const scheduled of dueTasks) {
+      const taskData = {
+        id: scheduled.id,
+        type: scheduled.task_type || 'general',
+        description: scheduled.description || scheduled.title,
+        assigned_to: scheduled.assigned_to || 'ANY',
+        user_id: scheduled.user_id,
+        payload: scheduled.payload || {},
+        _source: 'scheduled-task',
+        _schedule: scheduled.schedule,
+        _scheduled_task_id: scheduled.id
+      };
+
+      const inboxDir = path.join(WORKSPACE, 'inbox');
+      await mkdir(inboxDir, { recursive: true });
+      const filename = `scheduled-${scheduled.id.slice(0, 8)}-${Date.now()}.json`;
+      await writeFile(path.join(inboxDir, filename), JSON.stringify(taskData, null, 2));
+
+      // Compute next run and update record
+      const nextRun = computeNextRun(scheduled.schedule);
+      await supabase.from('scheduled_tasks').update({
+        last_run_at: now,
+        next_run_at: nextRun,
+        updated_at: now
+      }).eq('id', scheduled.id);
+
+      await logActivity(
+        scheduled.assigned_to || 'system',
+        'scheduled_task_dispatched',
+        { scheduled_task_id: scheduled.id, title: scheduled.title, schedule: scheduled.schedule },
+        scheduled.user_id
+      );
+
+      await log(`Scheduled task dispatched: ${scheduled.title} → inbox`);
+    }
+  } catch (err) {
+    await log(`Scheduler error: ${err.message}`);
+  }
+}
+
+function startScheduler() {
+  pollScheduledTasks().catch(err => log(`Scheduler error: ${err.message}`));
+  setInterval(() => {
+    pollScheduledTasks().catch(err => log(`Scheduler error: ${err.message}`));
+  }, 60000);
+}
+
+// --- Task Processing ---
+
 async function processTask(task) {
   currentTask = task.description || task.type || 'unknown';
   lastTaskAt = new Date().toISOString();
@@ -196,24 +303,44 @@ async function processTask(task) {
     if (task.type === 'upload' && task.upload_file) {
       result = await uploadFile(task.upload_file, task.bucket || 'completed-pdfs');
     } else if (task.type === 'task-write' && task.record) {
-      result = await writeToTasks(task.record);
+      // Preserve user_id from the routed task if present
+      if (task.user_id && !task.record.user_id) {
+        task.record.user_id = task.user_id;
+      }
+      result = await writeToTable('tasks', task.record);
+    } else if (task.type === 'log-activity') {
+      await logActivity(
+        task.agent_name || 'unknown',
+        task.action || 'unknown',
+        task.details || {},
+        task.user_id || null,
+        task.task_id || null
+      );
+      result = { logged: true };
     } else if (task.table) {
       const table = task.table;
 
-      if (task.record && !WRITABLE_TABLES.includes(table)) {
-        result = { error: `DENIED: Write access to '${table}' is not permitted. Writable tables: ${WRITABLE_TABLES.join(', ')}` };
-        await log(`WRITE DENIED: attempted write to '${table}'`);
-      } else if (task.record) {
-        result = await writeToTasks(task.record);
+      if (task.record) {
+        // Preserve user_id from the routed task
+        if (task.user_id && !task.record.user_id) {
+          task.record.user_id = task.user_id;
+        }
+        result = await writeToTable(table, task.record);
       } else {
         result = await queryTable(table, task.query || {});
       }
     } else {
-      // Fall back to Gemini for analysis/planning
       const systemPrompt = await loadSystemPrompt();
       const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what Supabase operations would be needed. If credentials are not configured, explain what would happen once they are.`;
       const genResult = await model.generateContent(prompt);
       result = { analysis: genResult.response.text() };
+    }
+
+    // Log activity for completed tasks with user context
+    if (task.user_id) {
+      await logActivity(AGENT_NAME, 'task_completed', {
+        type: task.type, description: (task.description || '').slice(0, 100)
+      }, task.user_id, task.id || null);
     }
 
     const output = {
@@ -252,6 +379,10 @@ async function main() {
   // Watch agent-status.json for changes and sync to Supabase
   const statusWatcher = watchAgentStatus();
   await log('Watching agent-status.json for status sync');
+
+  // Start scheduled tasks poller (every 60s)
+  startScheduler();
+  await log('Scheduled tasks poller started — checking every 60s');
 
   const watcher = watch(TASK_FILE, {
     ignoreInitial: false,

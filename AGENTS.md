@@ -184,6 +184,28 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
+## Multi-User Model
+
+All user-facing data is scoped by `user_id` with Supabase Row Level Security.
+
+| Table | RLS Policy | Notes |
+|-------|-----------|-------|
+| tasks | SELECT, INSERT, UPDATE own | `user_id = auth.uid()` |
+| scheduled_tasks | SELECT, INSERT, UPDATE, DELETE own | `user_id = auth.uid()` |
+| agent_activity | SELECT own | `user_id = auth.uid()` |
+| agent_status | SELECT all authenticated | Shared health dashboard |
+
+**Key design:**
+- `user_id` defaults to `auth.uid()` on INSERT (set by Postgres, not the app)
+- Clark uses `service_key` which bypasses RLS for backend operations
+- Frontend clients use `anon` key + user JWT — RLS filters automatically
+- `user_id` flows through the full pipeline: Supabase webhook → Sentry → Orchestrator → Agent → Clark
+- Clark preserves `user_id` on all writes when present in the routed task
+
+**Scheduled tasks:** Users create cron-scheduled tasks in Supabase. Clark polls every 60s, dispatches due tasks to the orchestrator inbox with `user_id`, and computes the next run time.
+
+---
+
 ## Health Monitoring & Skills
 
 ### Health Endpoints

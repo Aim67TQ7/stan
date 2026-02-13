@@ -44,6 +44,22 @@ STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardra
 - ORACLE (Opus 4.6): Orchestrator-routed tasks requiring advanced reasoning. Each call is stateless with full context. Token-budgeted and logged.
 - Claude Code can override, audit, or shut down any layer below it at any time.
 
+## Multi-User & Row Level Security
+- All user-facing tables (tasks, scheduled_tasks, agent_activity) have `user_id` referencing `auth.users`
+- RLS enabled: users only see their own tasks, activity, and scheduled tasks
+- `agent_status` is shared — all authenticated users see the same agent health
+- Clark uses `service_key` (bypasses RLS) for backend operations; frontend uses `anon` key + JWT
+- `user_id` flows through the pipeline: Supabase → webhook → sentry → orchestrator → agent → Clark
+- Clark auto-sets `user_id` on writes when present in the routed task
+- SQL migration: `/opt/stan/migrations/001_multi_user_rls.sql`
+
+## Scheduled Tasks
+- Users create scheduled tasks in Supabase `scheduled_tasks` table with cron expressions
+- Clark polls every 60 seconds for enabled tasks where `next_run_at <= now()`
+- Due tasks are dispatched to `workspace/inbox/` with user_id and routed by orchestrator
+- Clark computes `next_run_at` via cron-parser after each execution
+- Activity logged to `agent_activity` table for each dispatch
+
 ## Health Monitoring
 - Every agent exposes a `/health` endpoint (containers on :3001, sentry on :3000, oracle on :3002)
 - Health returns: status, last_task_at, current_task, api_key_valid, loaded_skills, uptime_seconds

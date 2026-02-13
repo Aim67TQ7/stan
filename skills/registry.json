@@ -38,12 +38,14 @@
       }
     },
     "clark": {
-      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "supabase-read", "supabase-write", "file-upload", "status-sync"],
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "supabase-read", "supabase-write", "file-upload", "status-sync", "activity-logging", "scheduled-tasks"],
       "custom": {
         "supabase-read": { "description": "SELECT queries from any Supabase table with filters" },
-        "supabase-write": { "description": "UPSERT records to tasks and agent_status tables" },
+        "supabase-write": { "description": "UPSERT records to tasks, agent_status, agent_activity, scheduled_tasks" },
         "file-upload": { "description": "Upload PDFs to Supabase storage buckets" },
-        "status-sync": { "description": "Watch agent-status.json and sync to Supabase agent_status table" }
+        "status-sync": { "description": "Watch agent-status.json and sync to Supabase agent_status table" },
+        "activity-logging": { "description": "Log agent activity to agent_activity table with user context" },
+        "scheduled-tasks": { "description": "Poll and dispatch scheduled tasks from Supabase every 60s" }
       }
     },
     "scout": {
