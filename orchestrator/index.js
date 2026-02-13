@@ -13,6 +13,21 @@ const LOGS = '/app/logs';
 const AGENTS_DIR = '/app/agents';
 const STATUS_FILE = '/app/workspace/agent-status.json';
 
+// Prevent double-processing from watcher + poller race
+const processing = new Set();
+
+// Agent name → agent (from assigned_to field set by Sentry/Supabase)
+const ASSIGNED_TO_MAP = {
+  MAGNUS: 'magnus',
+  PETE: 'pete',
+  CAESAR: 'caesar',
+  MAGGIE: 'maggie',
+  CLARK: 'clark',
+  SENTRY: 'sentry',
+  SCOUT: 'scout',
+  ORACLE: 'oracle'
+};
+
 const ORACLE_ROUTES = {
   complex: 'oracle',
   architecture: 'oracle',
@@ -24,38 +39,97 @@ const ORACLE_ROUTES = {
 };
 
 const AGENT_ROUTES = {
+  // Magnus — equipment & technical
   equipment: 'magnus',
   technical: 'magnus',
   knowledge: 'magnus',
+  magnet: 'magnus',
+  separator: 'magnus',
+  conveyor: 'magnus',
+  detector: 'magnus',
+  specification: 'magnus',
+  'spec sheet': 'magnus',
+  bunting: 'magnus',
+
+  // Pete — documents
   document: 'pete',
   reconstruct: 'pete',
   pdf: 'pete',
   format: 'pete',
+  template: 'pete',
+  reformat: 'pete',
+  ocr: 'pete',
+
+  // Caesar — Epicor/ERP
   epicor: 'caesar',
+  erp: 'caesar',
   order: 'caesar',
-  csr: 'caesar',
+  quote: 'caesar',
+  shipment: 'caesar',
   baq: 'caesar',
   customer: 'caesar',
+  csr: 'caesar',
+  mto: 'caesar',
+  job: 'caesar',
+  part: 'caesar',
+  shortage: 'caesar',
+  otd: 'caesar',
+  resource: 'caesar',
+  invoice: 'caesar',
+  'sales order': 'caesar',
+  'purchase order': 'caesar',
+  inventory: 'caesar',
+  warehouse: 'caesar',
+  shipping: 'caesar',
+  'on time': 'caesar',
+  backlog: 'caesar',
+  'work order': 'caesar',
+
+  // Maggie — communications
   email: 'maggie',
   draft: 'maggie',
   communication: 'maggie',
   letter: 'maggie',
   respond: 'maggie',
+  reply: 'maggie',
+  memo: 'maggie',
+  notice: 'maggie',
+  announcement: 'maggie',
+  newsletter: 'maggie',
+  write: 'maggie',
+  compose: 'maggie',
+
+  // Clark — Supabase/database
   supabase: 'clark',
-  query: 'clark',
+  database: 'clark',
+  table: 'clark',
+  schema: 'clark',
+  sql: 'clark',
+  bucket: 'clark',
   upload: 'clark',
   'task-write': 'clark',
-  database: 'clark',
+  storage: 'clark',
+  migration: 'clark',
+
+  // Sentry — webhooks/scheduling
   webhook: 'sentry',
   cron: 'sentry',
   schedule: 'sentry',
   hook: 'sentry',
+  trigger: 'sentry',
+
+  // Scout — research
   research: 'scout',
   search: 'scout',
   investigate: 'scout',
   lookup: 'scout',
   'find out': 'scout',
-  web: 'scout'
+  'look up': 'scout',
+  'look into': 'scout',
+  pricing: 'scout',
+  'market data': 'scout',
+  competitor: 'scout',
+  trend: 'scout'
 };
 
 // Health monitoring config
@@ -144,52 +218,77 @@ function routeTask(task) {
   const type = (task.type || '').toLowerCase();
   const assignedTo = (task.assigned_to || '').toUpperCase();
   const content = (task.description || '').toLowerCase();
+  const title = (task.title || '').toLowerCase();
+  const combined = `${content} ${title}`;
 
-  // Explicit ORACLE assignment
-  if (assignedTo === 'ORACLE') return 'oracle';
-
-  // ORACLE type/keyword match (checked before general routes)
-  if (ORACLE_ROUTES[type]) return 'oracle';
-  for (const keyword of Object.keys(ORACLE_ROUTES)) {
-    if (content.includes(keyword)) return 'oracle';
+  // 1. Explicit agent assignment from Supabase/Sentry (highest priority)
+  //    STAN and ANY mean "orchestrator decides" — fall through to keywords
+  if (assignedTo && assignedTo !== 'ANY' && assignedTo !== 'STAN' && ASSIGNED_TO_MAP[assignedTo]) {
+    return ASSIGNED_TO_MAP[assignedTo];
   }
 
-  // Direct match on task type
+  // 2. ORACLE type/keyword match (checked before general routes)
+  if (ORACLE_ROUTES[type]) return 'oracle';
+  for (const keyword of Object.keys(ORACLE_ROUTES)) {
+    if (combined.includes(keyword)) return 'oracle';
+  }
+
+  // 3. Direct match on task type
   if (AGENT_ROUTES[type]) return AGENT_ROUTES[type];
 
-  // Keyword scan on description
+  // 4. Keyword scan on description + title
   for (const [keyword, agent] of Object.entries(AGENT_ROUTES)) {
-    if (content.includes(keyword)) return agent;
+    if (combined.includes(keyword)) return agent;
   }
 
   return null;
 }
 
 async function classifyWithOpenClaw(task) {
-  const prompt = `You are a task router. Given this task, respond with ONLY one word: magnus, pete, caesar, maggie, clark, sentry, scout, or oracle.
+  const taskSummary = JSON.stringify({
+    type: task.type,
+    description: (task.description || '').slice(0, 500),
+    title: task.title
+  });
 
-magnus = equipment/technical questions about Bunting Magnetics
+  const prompt = `You are a task router. Respond with ONLY one word — the agent name.
+
+magnus = equipment/technical questions about Bunting Magnetics products
 pete = document reconstruction, formatting, PDF processing
-caesar = Epicor ERP, orders, customer service, BAQ queries
-maggie = drafting emails, letters, communications
-clark = Supabase database queries, task writes, PDF uploads to storage
+caesar = Epicor ERP, orders, jobs, parts, customers, quotes, shipments, BAQ queries
+maggie = drafting emails, letters, communications, newsletters
+clark = Supabase database queries, task writes, file uploads to storage
 sentry = webhooks, cron scheduling, periodic HTTP calls
 scout = web research, investigation, looking up information online
-oracle = complex reasoning, architecture decisions, code review, security audit, refactoring
+oracle = complex reasoning, architecture decisions, code review, security audit
 
-Task: ${JSON.stringify(task)}
+Task: ${taskSummary}
 
 Agent:`;
 
   try {
-    const { stdout } = await exec('openclaw', ['agent', '--message', prompt], {
+    const { stdout } = await exec('openclaw', [
+      'agent', '--agent', 'main', '--local', '--json',
+      '--message', prompt
+    ], {
       timeout: 30000,
       env: { ...process.env }
     });
-    const agent = stdout.trim().toLowerCase().split('\n').pop().trim();
+
+    // Parse JSON output from --json flag
+    let responseText = stdout;
+    try {
+      const parsed = JSON.parse(stdout);
+      responseText = parsed?.payloads?.[0]?.text || stdout;
+    } catch {
+      // stdout wasn't JSON, use raw
+    }
+
+    const agent = responseText.trim().toLowerCase().split('\n').pop().trim();
     if (['magnus', 'pete', 'caesar', 'maggie', 'clark', 'sentry', 'scout', 'oracle'].includes(agent)) {
       return agent;
     }
+    await log(`OpenClaw returned non-agent value: "${agent}"`);
   } catch (err) {
     await log(`OpenClaw classification failed: ${err.message}`);
   }
@@ -252,13 +351,22 @@ Task: ${JSON.stringify({ type: task.type, description: task.description, context
 Subtasks:`;
 
   try {
-    const { stdout } = await exec('openclaw', ['agent', '--message', prompt], {
+    const { stdout } = await exec('openclaw', [
+      'agent', '--agent', 'main', '--local', '--json',
+      '--message', prompt
+    ], {
       timeout: 30000,
       env: { ...process.env }
     });
 
-    // Extract JSON from response
-    const jsonMatch = stdout.match(/\[[\s\S]*\]/);
+    // Parse OpenClaw JSON output, then extract subtask array
+    let responseText = stdout;
+    try {
+      const parsed = JSON.parse(stdout);
+      responseText = parsed?.payloads?.[0]?.text || stdout;
+    } catch {}
+
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return null;
 
     const subtasks = JSON.parse(jsonMatch[0]);
@@ -310,6 +418,10 @@ async function executeWorkflow(task, filename) {
 async function processTask(filepath) {
   const filename = path.basename(filepath);
 
+  // Dedup: skip if already being processed by watcher or poller
+  if (processing.has(filename)) return;
+  processing.add(filename);
+
   try {
     const raw = await readFile(filepath, 'utf-8');
     const task = JSON.parse(raw);
@@ -329,9 +441,9 @@ async function processTask(filepath) {
     // Step 1: keyword routing
     let agent = routeTask(task);
 
-    // Step 2: fall back to OpenClaw LLM classification
+    // Step 2: fall back to OpenClaw LLM classification (requires internet — may fail)
     if (!agent) {
-      await log(`Keyword routing failed for ${filename}, using OpenClaw classification`);
+      await log(`Keyword routing failed for ${filename}, trying OpenClaw LLM`);
       agent = await classifyWithOpenClaw(task);
     }
 
@@ -346,11 +458,10 @@ async function processTask(filepath) {
       }
     }
 
+    // Step 4: default fallback — maggie for general tasks, rather than erroring
     if (!agent) {
-      await log(`UNROUTABLE: ${filename} — moving to outbox with error`);
-      const errorTask = { ...task, _error: 'Could not determine target agent', _status: 'unroutable' };
-      await writeFile(path.join(OUTBOX, `error-${filename}`), JSON.stringify(errorTask, null, 2));
-      return;
+      agent = 'maggie';
+      await log(`Default routing ${filename} → maggie (no keyword/LLM match)`);
     }
 
     await dispatchToAgent(agent, task, filename);
@@ -361,6 +472,8 @@ async function processTask(filepath) {
 
   } catch (err) {
     await log(`ERROR processing ${filename}: ${err.message}`);
+  } finally {
+    processing.delete(filename);
   }
 }
 
