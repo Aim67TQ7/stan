@@ -1,0 +1,13 @@
+{
+  "name": "oracle-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Host-side ORACLE agent — executes tasks via claude CLI",
+  "main": "runner.js",
+  "scripts": {
+    "start": "node runner.js"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0"
+  }
+}

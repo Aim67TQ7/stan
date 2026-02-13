@@ -11,6 +11,16 @@ const OUTBOX = '/app/workspace/outbox';
 const LOGS = '/app/logs';
 const AGENTS_DIR = '/app/agents';
 
+const ORACLE_ROUTES = {
+  complex: 'oracle',
+  architecture: 'oracle',
+  'code-review': 'oracle',
+  audit: 'oracle',
+  oracle: 'oracle',
+  refactor: 'oracle',
+  security: 'oracle'
+};
+
 const AGENT_ROUTES = {
   equipment: 'magnus',
   technical: 'magnus',
@@ -56,7 +66,17 @@ async function log(message) {
 
 function routeTask(task) {
   const type = (task.type || '').toLowerCase();
+  const assignedTo = (task.assigned_to || '').toUpperCase();
   const content = (task.description || '').toLowerCase();
+
+  // Explicit ORACLE assignment
+  if (assignedTo === 'ORACLE') return 'oracle';
+
+  // ORACLE type/keyword match (checked before general routes)
+  if (ORACLE_ROUTES[type]) return 'oracle';
+  for (const keyword of Object.keys(ORACLE_ROUTES)) {
+    if (content.includes(keyword)) return 'oracle';
+  }
 
   // Direct match on task type
   if (AGENT_ROUTES[type]) return AGENT_ROUTES[type];
@@ -70,7 +90,7 @@ function routeTask(task) {
 }
 
 async function classifyWithOpenClaw(task) {
-  const prompt = `You are a task router. Given this task, respond with ONLY one word: magnus, pete, caesar, maggie, clark, sentry, or scout.
+  const prompt = `You are a task router. Given this task, respond with ONLY one word: magnus, pete, caesar, maggie, clark, sentry, scout, or oracle.
 
 magnus = equipment/technical questions about Bunting Magnetics
 pete = document reconstruction, formatting, PDF processing
@@ -79,6 +99,7 @@ maggie = drafting emails, letters, communications
 clark = Supabase database queries, task writes, PDF uploads to storage
 sentry = webhooks, cron scheduling, periodic HTTP calls
 scout = web research, investigation, looking up information online
+oracle = complex reasoning, architecture decisions, code review, security audit, refactoring
 
 Task: ${JSON.stringify(task)}
 
@@ -90,7 +111,7 @@ Agent:`;
       env: { ...process.env }
     });
     const agent = stdout.trim().toLowerCase().split('\n').pop().trim();
-    if (['magnus', 'pete', 'caesar', 'maggie', 'clark', 'sentry', 'scout'].includes(agent)) {
+    if (['magnus', 'pete', 'caesar', 'maggie', 'clark', 'sentry', 'scout', 'oracle'].includes(agent)) {
       return agent;
     }
   } catch (err) {

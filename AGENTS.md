@@ -156,6 +156,34 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
+## ORACLE — Claude Code Escalation Agent
+
+**Role:** Advanced reasoning, architecture decisions, code review, security audits, and complex multi-step analysis via Claude Code CLI.
+
+**Model:** Claude Opus 4.6 (via `claude -p` CLI)
+
+**Scope:**
+- Handles tasks that exceed Gemini Flash capabilities — complex reasoning, code review, architecture design, security audits
+- Invoked by the orchestrator writing `current-task.json` to `/agents/oracle/`
+- Host-side `runner.js` watches for tasks, executes `claude -p`, writes results to outbox
+- Stateless — every call must include full context (no memory between invocations)
+- Usage and cost tracked per-call in `/agents/oracle/logs/`
+
+**Routing:**
+- `assigned_to: ORACLE` in task payload
+- Task types: `complex`, `architecture`, `code-review`, `audit`, `oracle`, `refactor`, `security`
+- OpenClaw fallback classification includes ORACLE as a routing target
+
+**Boundaries:**
+- NOT a Docker container — runs on the host directly (requires `claude` CLI)
+- Token budget guard: warning logged if output exceeds 10,000 tokens
+- 5-minute execution timeout per task
+- Cannot modify CLAUDE.md, .env, guardrails, or create-agent.sh
+- All invocations logged with token counts and duration
+- Robert's discretion — ORACLE is the most expensive agent, use intentionally
+
+---
+
 ## Dynamic Agent Creation
 
 STAN can create new agents at runtime using `/opt/stan/create-agent.sh`.

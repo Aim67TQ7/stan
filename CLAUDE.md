@@ -34,12 +34,14 @@ STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardra
 - Root Authority: Claude Code at /opt/stan — Robert's direct interface
 - Orchestrator (STAN): Gemini Flash 2.0 in Docker container — manages agents, runs operations
 - Container Agents: Gemini Flash 2.0 — task execution, scoped functions (magnus, pete, caesar, maggie, clark, sentry, scout)
+- ORACLE Agent: Claude Opus 4.6 — host-level agent (NOT containerized), invoked via `claude -p` for complex/architecture/code-review tasks. Stateless, 10k output token budget guard, logs to `/opt/stan/agents/oracle/logs/`
 - Agent Template: `/opt/stan/agent-template/` + `create-agent.sh` for dynamic agent spawning
 - Git: https://github.com/Aim67TQ7/stan.git
 
 ## Model Strategy
-- Claude Code (Opus 4.6): NOT autonomous. Robert's master key for oversight, auditing, and architecture decisions.
+- Claude Code (Opus 4.6): NOT autonomous. Robert's master key for oversight, auditing, and architecture decisions. Also powers ORACLE agent via `claude -p` for delegated complex tasks.
 - Gemini Flash 2.0: Powers STAN orchestrator and all container agents. Handles volume work.
+- ORACLE (Opus 4.6): Orchestrator-routed tasks requiring advanced reasoning. Each call is stateless with full context. Token-budgeted and logged.
 - Claude Code can override, audit, or shut down any layer below it at any time.
 
 ## Escalation Triggers
