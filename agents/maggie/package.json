@@ -1,0 +1,11 @@
+{
+  "name": "stan-agent-maggie",
+  "version": "1.0.0",
+  "description": "Maggie - Communications Drafter Agent",
+  "main": "main.js",
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "chokidar": "^4.0.0"
+  }
+}

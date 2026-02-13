@@ -1,0 +1,11 @@
+{
+  "name": "stan-agent-pete",
+  "version": "1.0.0",
+  "description": "Pete - Document Reconstruction Agent",
+  "main": "main.js",
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "chokidar": "^4.0.0"
+  }
+}

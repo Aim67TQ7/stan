@@ -1,0 +1,10 @@
+{
+  "name": "stan-orchestrator",
+  "version": "1.0.0",
+  "description": "STAN Orchestrator - Routes tasks to agents via OpenClaw + Gemini Flash 2.0",
+  "main": "index.js",
+  "type": "module",
+  "dependencies": {
+    "chokidar": "^4.0.0"
+  }
+}
