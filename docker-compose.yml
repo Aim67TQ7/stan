@@ -1,0 +1,100 @@
+version: "3.8"
+
+networks:
+  stan-internal:
+    driver: bridge
+    internal: true
+  stan-external:
+    driver: bridge
+
+services:
+  stan-orchestrator:
+    container_name: stan-orchestrator
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ./agents:/app/agents
+      - ./workspace:/app/workspace
+      - ./logs:/app/logs
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ROLE=orchestrator
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+    restart: unless-stopped
+    command: ["node", "index.js"]
+
+  magnus:
+    container_name: magnus
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ./agents/magnus:/app/agent
+      - ./workspace:/app/workspace
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ROLE=magnus
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+      - stan-external
+    restart: unless-stopped
+    depends_on:
+      - stan-orchestrator
+    command: ["node", "index.js"]
+
+  pete:
+    container_name: pete
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ./agents/pete:/app/agent
+      - ./workspace:/app/workspace
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ROLE=pete
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+    restart: unless-stopped
+    depends_on:
+      - stan-orchestrator
+    command: ["node", "index.js"]
+
+  caesar:
+    container_name: caesar
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ./agents/caesar:/app/agent
+      - ./workspace:/app/workspace
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ROLE=caesar
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+      - stan-external
+    restart: unless-stopped
+    depends_on:
+      - stan-orchestrator
+    command: ["node", "index.js"]
+
+  maggie:
+    container_name: maggie
+    image: node:22
+    working_dir: /app
+    volumes:
+      - ./agents/maggie:/app/agent
+      - ./workspace:/app/workspace
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ROLE=maggie
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+    restart: unless-stopped
+    depends_on:
+      - stan-orchestrator
+    command: ["node", "index.js"]
