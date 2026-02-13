@@ -13,6 +13,14 @@ const TASK_FILE = path.join(AGENT_DIR, 'current-task.json');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
+// Epicor config
+const EPICOR_BASE_URL = process.env.EPICOR_BASE_URL;
+const EPICOR_API_KEY = process.env.EPICOR_API_KEY;
+const EPICOR_USERNAME = process.env.EPICOR_USERNAME;
+const EPICOR_PASSWORD = process.env.EPICOR_PASSWORD;
+const EPICOR_COMPANIES = (process.env.EPICOR_COMPANIES || '').split(',').filter(Boolean);
+const DEFAULT_COMPANY = EPICOR_COMPANIES[0] || 'BMC';
+
 async function log(message) {
   const timestamp = new Date().toISOString();
   const entry = `[${timestamp}] [${AGENT_NAME}] ${message}\n`;
@@ -45,34 +53,53 @@ async function loadBAQIndex() {
   }
 }
 
-async function callEpicorAPI(endpoint, params) {
-  const baseUrl = process.env.EPICOR_BASE_URL;
-  const apiKey = process.env.EPICOR_API_KEY;
+function epicorConfigured() {
+  return EPICOR_BASE_URL && EPICOR_API_KEY && EPICOR_USERNAME && EPICOR_PASSWORD;
+}
 
-  if (!baseUrl || !apiKey) {
-    return { error: 'Epicor credentials not configured. See TODO.md.' };
+function buildAuthHeaders(company) {
+  const basicAuth = Buffer.from(`${EPICOR_USERNAME}:${EPICOR_PASSWORD}`).toString('base64');
+  return {
+    'Authorization': `Basic ${basicAuth}`,
+    'x-api-key': EPICOR_API_KEY,
+    'Content-Type': 'application/json',
+    'CallSettings': JSON.stringify({ Company: company || DEFAULT_COMPANY })
+  };
+}
+
+async function callEpicorAPI(endpoint, { params, company, method = 'GET', body } = {}) {
+  if (!epicorConfigured()) {
+    return { error: 'Epicor credentials not configured. Need EPICOR_BASE_URL, EPICOR_API_KEY, EPICOR_USERNAME, EPICOR_PASSWORD.' };
   }
 
-  const url = new URL(endpoint, baseUrl);
+  const resolvedCompany = company || DEFAULT_COMPANY;
+  if (!EPICOR_COMPANIES.includes(resolvedCompany)) {
+    return { error: `Invalid company "${resolvedCompany}". Valid: ${EPICOR_COMPANIES.join(', ')}` };
+  }
+
+  const url = new URL(endpoint, EPICOR_BASE_URL);
   for (const [k, v] of Object.entries(params || {})) {
     url.searchParams.set(k, v);
   }
 
-  await log(`Epicor API call: ${url.pathname}${url.search}`);
+  await log(`Epicor API ${method} [${resolvedCompany}]: ${url.pathname}${url.search}`);
 
   try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
+    const fetchOpts = {
+      method,
+      headers: buildAuthHeaders(resolvedCompany)
+    };
+    if (body && method !== 'GET') {
+      fetchOpts.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(url.toString(), fetchOpts);
     const data = await response.json();
-    await log(`Epicor API response: ${response.status}`);
-    return { status: response.status, data };
+    await log(`Epicor API response: ${response.status} [${resolvedCompany}]`);
+    return { status: response.status, company: resolvedCompany, data };
   } catch (err) {
-    await log(`Epicor API error: ${err.message}`);
-    return { error: err.message };
+    await log(`Epicor API error [${resolvedCompany}]: ${err.message}`);
+    return { error: err.message, company: resolvedCompany };
   }
 }
 
@@ -88,16 +115,19 @@ async function processTask(task) {
 ${JSON.stringify(baqIndex, null, 2)}
 
 ## Epicor Configuration
-Base URL: ${process.env.EPICOR_BASE_URL || 'NOT CONFIGURED'}
-API Key: ${process.env.EPICOR_API_KEY ? 'SET' : 'NOT CONFIGURED'}
+Base URL: ${EPICOR_BASE_URL || 'NOT CONFIGURED'}
+Auth: ${epicorConfigured() ? 'Basic Auth + API Key CONFIGURED' : 'NOT CONFIGURED'}
+Companies: ${EPICOR_COMPANIES.length ? EPICOR_COMPANIES.join(', ') : 'NOT CONFIGURED'}
+Default Company: ${DEFAULT_COMPANY}
 
 ## Current Task
 ${JSON.stringify(task, null, 2)}
 
 Analyze the task and determine:
 1. Which BAQ or Epicor endpoint to use
-2. What parameters are needed
-3. Provide the response plan
+2. Which company code to target (BMC, BME, or MAI) — default to ${DEFAULT_COMPANY} if not specified
+3. What parameters are needed
+4. Provide the response plan
 
 If credentials are not configured, explain what data would be returned once they are set up.`;
 
@@ -107,7 +137,8 @@ If credentials are not configured, explain what data would be returned once they
   const output = {
     agent: AGENT_NAME,
     task_source: task._source_file || 'unknown',
-    query: 'Gemini analysis (live Epicor calls pending credentials)',
+    company: task.company || DEFAULT_COMPANY,
+    query: epicorConfigured() ? 'Gemini analysis + Epicor live' : 'Gemini analysis (Epicor credentials pending)',
     result: response,
     record_count: 0,
     completed_at: new Date().toISOString()
@@ -121,6 +152,8 @@ If credentials are not configured, explain what data would be returned once they
 
 async function main() {
   await log('Caesar agent starting...');
+  await log(`Companies: ${EPICOR_COMPANIES.join(', ') || 'NONE'} | Default: ${DEFAULT_COMPANY}`);
+  await log(`Epicor auth: ${epicorConfigured() ? 'OK' : 'MISSING CREDENTIALS'}`);
 
   const watcher = watch(TASK_FILE, {
     ignoreInitial: false,

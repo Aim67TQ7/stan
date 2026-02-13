@@ -16,8 +16,8 @@ services:
       - ./agents:/app/agents
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=orchestrator
       - NODE_ENV=production
     networks:
@@ -34,8 +34,8 @@ services:
       - ./agents/magnus:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=magnus
       - NODE_ENV=production
     networks:
@@ -55,8 +55,8 @@ services:
       - ./agents/pete:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=pete
       - NODE_ENV=production
     networks:
@@ -75,12 +75,10 @@ services:
       - ./agents/caesar:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=caesar
       - NODE_ENV=production
-      - EPICOR_BASE_URL=${EPICOR_BASE_URL}
-      - EPICOR_API_KEY=${EPICOR_API_KEY}
     networks:
       - stan-internal
       - stan-external
@@ -98,8 +96,8 @@ services:
       - ./agents/maggie:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=maggie
       - NODE_ENV=production
     networks:
@@ -118,12 +116,10 @@ services:
       - ./agents/clark:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=clark
       - NODE_ENV=production
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
     networks:
       - stan-internal
       - stan-external
@@ -143,8 +139,8 @@ services:
       - ./logs:/app/logs
     ports:
       - "3000:3000"
+    env_file: .env
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ROLE=sentry
       - NODE_ENV=production
     networks:

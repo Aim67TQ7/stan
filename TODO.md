@@ -4,34 +4,39 @@
 
 ### 1. GEMINI_API_KEY
 - **What:** Google AI Studio API key for Gemini Flash 2.0
-- **Where:** Set as environment variable on the host: `export GEMINI_API_KEY=your_key_here`
+- **Where:** `/opt/stan/.env` → `GEMINI_API_KEY=`
 - **Get it:** https://aistudio.google.com/ → "Get API Key"
 - **Used by:** All 7 containers (orchestrator + 6 agents)
 
 ### 2. Epicor Credentials (Caesar agent)
-- **EPICOR_BASE_URL** — Your Epicor REST API base URL (e.g., `https://your-company.epicorsaas.com/api/v2`)
-- **EPICOR_API_KEY** — Epicor API key or Bearer token
-- **Where:** Set as environment variables on the host
+- **Auth method:** Basic Auth (username/password) + API key header
+- **EPICOR_BASE_URL** — `https://epicor.buntingmagnetics.com/EpicorProd` (pre-filled)
+- **EPICOR_API_KEY** — Epicor API key sent as `x-api-key` header
+- **EPICOR_USERNAME** — Epicor login username
+- **EPICOR_PASSWORD** — Epicor login password
+- **EPICOR_COMPANIES** — `BMC,BME,MAI` (pre-filled)
+- **Where:** `/opt/stan/.env`
+- **Company codes:** BMC (Bunting Magnetics Co.), BME (Bunting Magnetics Europe), MAI (Magnet Applications Inc.)
 - **Note:** Caesar will run without these but cannot make live Epicor calls
 
 ### 3. Supabase Credentials (Clark agent)
 - **SUPABASE_URL** — Your Supabase project URL (e.g., `https://xxxx.supabase.co`)
 - **SUPABASE_SERVICE_KEY** — Supabase service role key (NOT the anon key — Clark needs service-level access)
-- **Where:** Set as environment variables on the host
+- **Where:** `/opt/stan/.env`
 - **Note:** Clark will run without these but cannot make live Supabase calls
 
 ## NON-BLOCKING — Can Be Done After First Launch
 
-### 3. Magnus Knowledge Base
+### 4. Magnus Knowledge Base
 - Add equipment Markdown files to `/opt/stan/agents/magnus/knowledge/`
 - One file per product line or category recommended
 - Magnus reads all `.md` files in this directory at task time
 
-### 4. Pete's Vault
+### 5. Pete's Vault
 - Add company logos, letterhead templates, and reference documents to `/opt/stan/agents/pete/vault/`
 - Pete checks vault for templates before building from scratch
 
-### 5. Caesar BAQ Definitions
+### 6. Caesar BAQ Definitions
 - Add BAQ definition JSON files to `/opt/stan/agents/caesar/baqs/`
 - Format per BAQ:
 ```json
@@ -69,14 +74,3 @@
   "on_failure": "log"
 }
 ```
-
-### 9. .env File (Optional Convenience)
-- Create `/opt/stan/.env` with all keys to avoid exporting each time:
-```
-GEMINI_API_KEY=your_key
-EPICOR_BASE_URL=your_url
-EPICOR_API_KEY=your_key
-SUPABASE_URL=your_url
-SUPABASE_SERVICE_KEY=your_key
-```
-- docker-compose automatically reads `.env` from the project root
