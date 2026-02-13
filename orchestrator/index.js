@@ -10,6 +10,7 @@ const INBOX = '/app/workspace/inbox';
 const OUTBOX = '/app/workspace/outbox';
 const LOGS = '/app/logs';
 const AGENTS_DIR = '/app/agents';
+const STATUS_FILE = '/app/workspace/agent-status.json';
 
 const ORACLE_ROUTES = {
   complex: 'oracle',
@@ -56,6 +57,17 @@ const AGENT_ROUTES = {
   web: 'scout'
 };
 
+// Health monitoring config
+const HEALTH_TARGETS = [
+  { name: 'magnus', url: 'http://magnus:3001/health' },
+  { name: 'pete', url: 'http://pete:3001/health' },
+  { name: 'caesar', url: 'http://caesar:3001/health' },
+  { name: 'maggie', url: 'http://maggie:3001/health' },
+  { name: 'clark', url: 'http://clark:3001/health' },
+  { name: 'scout', url: 'http://scout:3001/health' },
+  { name: 'sentry', url: 'http://sentry:3000/health' }
+];
+
 async function log(message) {
   const timestamp = new Date().toISOString();
   const entry = `[${timestamp}] ${message}\n`;
@@ -63,6 +75,69 @@ async function log(message) {
   await writeFile(logFile, entry, { flag: 'a' }).catch(() => {});
   console.log(entry.trim());
 }
+
+// --- Health Monitor ---
+
+async function pollAgent(target) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(target.url, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return { agent: target.name, status: 'unhealthy', error: `HTTP ${response.status}` };
+    }
+
+    return await response.json();
+  } catch (err) {
+    return { agent: target.name, status: 'unreachable', error: err.message };
+  }
+}
+
+async function getOracleHealth() {
+  const healthFile = path.join(AGENTS_DIR, 'oracle', 'health.json');
+  try {
+    const raw = await readFile(healthFile, 'utf-8');
+    const health = JSON.parse(raw);
+    // Check if heartbeat is stale (>60s)
+    const age = Date.now() - new Date(health.last_updated || 0).getTime();
+    if (age > 60000 && !health.uptime_seconds) {
+      return { agent: 'oracle', status: 'stale', error: 'Health file older than 60s' };
+    }
+    return health;
+  } catch {
+    return { agent: 'oracle', status: 'offline', error: 'No health file found' };
+  }
+}
+
+async function runHealthCheck() {
+  const results = await Promise.all(HEALTH_TARGETS.map(pollAgent));
+  const oracleHealth = await getOracleHealth();
+  results.push(oracleHealth);
+
+  const statusData = {
+    polled_at: new Date().toISOString(),
+    agents: {}
+  };
+
+  for (const result of results) {
+    statusData.agents[result.agent] = result;
+  }
+
+  await writeFile(STATUS_FILE, JSON.stringify(statusData, null, 2));
+}
+
+function startHealthMonitor() {
+  // Run immediately, then every 30 seconds
+  runHealthCheck().catch(err => log(`Health check error: ${err.message}`));
+  setInterval(() => {
+    runHealthCheck().catch(err => log(`Health check error: ${err.message}`));
+  }, 30000);
+}
+
+// --- Task Routing ---
 
 function routeTask(task) {
   const type = (task.type || '').toLowerCase();
@@ -176,6 +251,10 @@ async function main() {
   await log('STAN Orchestrator starting...');
   await mkdir(INBOX, { recursive: true });
   await mkdir(OUTBOX, { recursive: true });
+
+  // Start health monitor (polls every 30s, writes agent-status.json)
+  startHealthMonitor();
+  await log('Health monitor started — polling every 30s');
 
   const watcher = watch(INBOX, {
     ignoreInitial: false,

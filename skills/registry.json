@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "updated_at": "2026-02-13",
+  "shared": {
+    "task-processing": { "description": "Process tasks from orchestrator via current-task.json file watcher" },
+    "workspace-output": { "description": "Write structured results to workspace/outbox as timestamped JSON" },
+    "logging": { "description": "Daily rotating log files to /logs/{agent}-YYYY-MM-DD.log" },
+    "gemini-flash": { "description": "Text generation via Gemini Flash 2.0 model" }
+  },
+  "agents": {
+    "magnus": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "knowledge-lookup", "equipment-analysis"],
+      "custom": {
+        "knowledge-lookup": { "description": "Query equipment knowledge base markdown files" },
+        "equipment-analysis": { "description": "Technical analysis of Bunting Magnetics equipment specs and configurations" }
+      }
+    },
+    "pete": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "document-reconstruction", "template-management"],
+      "custom": {
+        "document-reconstruction": { "description": "Reconstruct and reformat documents from source files" },
+        "template-management": { "description": "Manage document templates and reference materials in vault" }
+      }
+    },
+    "caesar": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "epicor-api", "baq-execution", "multi-company"],
+      "custom": {
+        "epicor-api": { "description": "REST API calls to Epicor ERP with Basic Auth + API key" },
+        "baq-execution": { "description": "Execute Business Activity Queries from BAQ definitions" },
+        "multi-company": { "description": "Switch between BMC, BME, MAI company contexts" }
+      }
+    },
+    "maggie": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "draft-communications", "tone-adaptation"],
+      "custom": {
+        "draft-communications": { "description": "Draft emails, letters, and notices for various audiences" },
+        "tone-adaptation": { "description": "Adapt communication tone: formal, friendly, direct, urgent" }
+      }
+    },
+    "clark": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "supabase-read", "supabase-write", "file-upload", "status-sync"],
+      "custom": {
+        "supabase-read": { "description": "SELECT queries from any Supabase table with filters" },
+        "supabase-write": { "description": "UPSERT records to tasks and agent_status tables" },
+        "file-upload": { "description": "Upload PDFs to Supabase storage buckets" },
+        "status-sync": { "description": "Watch agent-status.json and sync to Supabase agent_status table" }
+      }
+    },
+    "scout": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "web-search", "research-synthesis", "result-caching"],
+      "custom": {
+        "web-search": { "description": "Grounded web search via Gemini Flash with Google Search tool" },
+        "research-synthesis": { "description": "Synthesize search results into structured markdown reports" },
+        "result-caching": { "description": "24-hour SHA256-keyed cache for research results" }
+      }
+    },
+    "sentry": {
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "webhook-server", "cron-scheduler", "task-routing"],
+      "custom": {
+        "webhook-server": { "description": "Express HTTP server on port 3000 for incoming webhooks" },
+        "cron-scheduler": { "description": "node-cron scheduled HTTPS calls from JSON definitions" },
+        "task-routing": { "description": "Convert Supabase webhook payloads into routable orchestrator tasks" }
+      }
+    },
+    "oracle": {
+      "skills": ["task-processing", "workspace-output", "logging", "claude-cli", "code-review", "architecture-analysis", "security-audit"],
+      "custom": {
+        "claude-cli": { "description": "Execute prompts via claude -p CLI with JSON output" },
+        "code-review": { "description": "Deep code review and refactoring recommendations" },
+        "architecture-analysis": { "description": "System architecture design and evaluation" },
+        "security-audit": { "description": "Security vulnerability analysis and remediation" }
+      }
+    }
+  }
+}

@@ -16,6 +16,7 @@ services:
       - ./agents:/app/agents
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=orchestrator
@@ -34,6 +35,7 @@ services:
       - ./agents/magnus:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=magnus
@@ -55,6 +57,7 @@ services:
       - ./agents/pete:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=pete
@@ -75,6 +78,7 @@ services:
       - ./agents/caesar:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=caesar
@@ -96,6 +100,7 @@ services:
       - ./agents/maggie:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=maggie
@@ -116,6 +121,7 @@ services:
       - ./agents/clark:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=clark
@@ -137,6 +143,7 @@ services:
       - ./agents/scout:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     env_file: .env
     environment:
       - ROLE=scout
@@ -158,6 +165,7 @@ services:
       - ./agents/sentry:/app/agent
       - ./workspace:/app/workspace
       - ./logs:/app/logs
+      - ./skills:/app/skills:ro
     ports:
       - "3000:3000"
     env_file: .env

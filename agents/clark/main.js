@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 import { watch } from 'chokidar';
 import { readFile, writeFile, mkdir } from 'fs/promises';
+import { createServer } from 'http';
 import path from 'path';
 
 const AGENT_NAME = 'clark';
@@ -10,13 +11,19 @@ const WORKSPACE = '/app/workspace';
 const LOGS = '/app/logs';
 const UPLOADS_DIR = path.join(AGENT_DIR, 'uploads');
 const TASK_FILE = path.join(AGENT_DIR, 'current-task.json');
+const STATUS_FILE = path.join(WORKSPACE, 'agent-status.json');
 
-const WRITABLE_TABLES = ['tasks'];
+const WRITABLE_TABLES = ['tasks', 'agent_status'];
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
 let supabase = null;
+
+const startTime = Date.now();
+let lastTaskAt = null;
+let currentTask = null;
+let loadedSkills = [];
 
 function initSupabase() {
   const url = process.env.SUPABASE_URL;
@@ -31,6 +38,34 @@ async function log(message) {
   const logFile = path.join(LOGS, `${AGENT_NAME}-${timestamp.split('T')[0]}.log`);
   await writeFile(logFile, entry, { flag: 'a' }).catch(() => {});
   console.log(entry.trim());
+}
+
+async function loadSkills() {
+  try {
+    const registry = JSON.parse(await readFile('/app/skills/registry.json', 'utf-8'));
+    loadedSkills = registry.agents[AGENT_NAME]?.skills || [];
+  } catch { loadedSkills = []; }
+}
+
+function startHealthServer() {
+  createServer((req, res) => {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        agent: AGENT_NAME,
+        status: 'ok',
+        last_task_at: lastTaskAt,
+        current_task: currentTask,
+        api_key_valid: !!process.env.GEMINI_API_KEY,
+        supabase_connected: !!supabase,
+        loaded_skills: loadedSkills,
+        uptime_seconds: Math.floor((Date.now() - startTime) / 1000)
+      }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  }).listen(3001, '0.0.0.0');
 }
 
 async function loadSystemPrompt() {
@@ -97,48 +132,107 @@ async function uploadFile(filepath, bucket) {
   return { data };
 }
 
-async function processTask(task) {
-  await log(`Processing task: ${task.type || 'unknown'} — ${task.description || ''}`);
+async function syncAgentStatus(statusData) {
+  if (!supabase) return;
 
-  let result;
+  try {
+    const agents = statusData.agents || {};
+    const now = new Date().toISOString();
 
-  if (task.type === 'upload' && task.upload_file) {
-    result = await uploadFile(task.upload_file, task.bucket || 'completed-pdfs');
-  } else if (task.type === 'task-write' && task.record) {
-    result = await writeToTasks(task.record);
-  } else if (task.table) {
-    const table = task.table;
+    for (const [agentName, health] of Object.entries(agents)) {
+      const record = {
+        agent_name: agentName,
+        status: health.status || 'unknown',
+        last_heartbeat: now,
+        last_task_at: health.last_task_at || null,
+        current_task: health.current_task || null,
+        skills: health.loaded_skills || [],
+        uptime_seconds: health.uptime_seconds || 0,
+        updated_at: now
+      };
 
-    if (task.record && !WRITABLE_TABLES.includes(table)) {
-      result = { error: `DENIED: Write access to '${table}' is not permitted. Writable tables: ${WRITABLE_TABLES.join(', ')}` };
-      await log(`WRITE DENIED: attempted write to '${table}'`);
-    } else if (task.record) {
-      result = await writeToTasks(task.record);
-    } else {
-      result = await queryTable(table, task.query || {});
+      const { error } = await supabase.from('agent_status').upsert(record, { onConflict: 'agent_name' });
+      if (error) {
+        await log(`STATUS SYNC ERROR [${agentName}]: ${error.message}`);
+      }
     }
-  } else {
-    // Fall back to Gemini for analysis/planning
-    const systemPrompt = await loadSystemPrompt();
-    const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what Supabase operations would be needed. If credentials are not configured, explain what would happen once they are.`;
-    const genResult = await model.generateContent(prompt);
-    result = { analysis: genResult.response.text() };
+
+    await log(`Status synced: ${Object.keys(agents).length} agents`);
+  } catch (err) {
+    await log(`Status sync failed: ${err.message}`);
+  }
+}
+
+function watchAgentStatus() {
+  const watcher = watch(STATUS_FILE, {
+    ignoreInitial: false,
+    awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 200 }
+  });
+
+  watcher.on('add', handleStatusChange);
+  watcher.on('change', handleStatusChange);
+
+  async function handleStatusChange() {
+    try {
+      const raw = await readFile(STATUS_FILE, 'utf-8');
+      const statusData = JSON.parse(raw);
+      await syncAgentStatus(statusData);
+    } catch (err) {
+      await log(`Status file read error: ${err.message}`);
+    }
   }
 
-  const output = {
-    agent: AGENT_NAME,
-    task_source: task._source_file || 'unknown',
-    operation: task.type || 'read',
-    table: task.table || task.bucket || 'n/a',
-    result,
-    record_count: result.data ? (Array.isArray(result.data) ? result.data.length : 1) : 0,
-    completed_at: new Date().toISOString()
-  };
+  return watcher;
+}
 
-  const outFile = path.join(WORKSPACE, 'outbox', `${AGENT_NAME}-${Date.now()}.json`);
-  await mkdir(path.join(WORKSPACE, 'outbox'), { recursive: true });
-  await writeFile(outFile, JSON.stringify(output, null, 2));
-  await log(`Task complete. Output: ${outFile}`);
+async function processTask(task) {
+  currentTask = task.description || task.type || 'unknown';
+  lastTaskAt = new Date().toISOString();
+  await log(`Processing task: ${task.type || 'unknown'} — ${task.description || ''}`);
+
+  try {
+    let result;
+
+    if (task.type === 'upload' && task.upload_file) {
+      result = await uploadFile(task.upload_file, task.bucket || 'completed-pdfs');
+    } else if (task.type === 'task-write' && task.record) {
+      result = await writeToTasks(task.record);
+    } else if (task.table) {
+      const table = task.table;
+
+      if (task.record && !WRITABLE_TABLES.includes(table)) {
+        result = { error: `DENIED: Write access to '${table}' is not permitted. Writable tables: ${WRITABLE_TABLES.join(', ')}` };
+        await log(`WRITE DENIED: attempted write to '${table}'`);
+      } else if (task.record) {
+        result = await writeToTasks(task.record);
+      } else {
+        result = await queryTable(table, task.query || {});
+      }
+    } else {
+      // Fall back to Gemini for analysis/planning
+      const systemPrompt = await loadSystemPrompt();
+      const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what Supabase operations would be needed. If credentials are not configured, explain what would happen once they are.`;
+      const genResult = await model.generateContent(prompt);
+      result = { analysis: genResult.response.text() };
+    }
+
+    const output = {
+      agent: AGENT_NAME,
+      task_source: task._source_file || 'unknown',
+      operation: task.type || 'read',
+      table: task.table || task.bucket || 'n/a',
+      result,
+      record_count: result.data ? (Array.isArray(result.data) ? result.data.length : 1) : 0,
+      completed_at: new Date().toISOString()
+    };
+
+    const outFile = path.join(WORKSPACE, 'outbox', `${AGENT_NAME}-${Date.now()}.json`);
+    await mkdir(path.join(WORKSPACE, 'outbox'), { recursive: true });
+    await writeFile(outFile, JSON.stringify(output, null, 2));
+    await log(`Task complete. Output: ${outFile}`);
+  } finally {
+    currentTask = null;
+  }
 }
 
 async function main() {
@@ -150,6 +244,14 @@ async function main() {
   } else {
     await log('Supabase client initialized.');
   }
+
+  await loadSkills();
+  startHealthServer();
+  await log('Health server on :3001');
+
+  // Watch agent-status.json for changes and sync to Supabase
+  const statusWatcher = watchAgentStatus();
+  await log('Watching agent-status.json for status sync');
 
   const watcher = watch(TASK_FILE, {
     ignoreInitial: false,
@@ -173,6 +275,7 @@ async function main() {
 
   process.on('SIGTERM', async () => {
     await log('Shutting down');
+    await statusWatcher.close();
     await watcher.close();
     process.exit(0);
   });

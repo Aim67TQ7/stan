@@ -184,6 +184,27 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
+## Health Monitoring & Skills
+
+### Health Endpoints
+All agents expose a `/health` endpoint returning real-time status:
+
+| Agent | Endpoint | Port |
+|-------|----------|------|
+| magnus, pete, caesar, maggie, clark, scout | `http://{name}:3001/health` | 3001 |
+| sentry | `http://sentry:3000/health` | 3000 |
+| oracle | `http://localhost:3002/health` + `health.json` file | 3002 |
+
+**Response fields:** `agent`, `status`, `last_task_at`, `current_task`, `api_key_valid`, `loaded_skills`, `uptime_seconds`
+
+### Health Monitor
+The orchestrator polls all agent health endpoints every 30 seconds and writes the combined status to `/opt/stan/workspace/agent-status.json`. Clark watches this file and syncs each agent's status to the Supabase `agent_status` table.
+
+### Skills Registry
+Skills are defined in `/opt/stan/skills/registry.json`. Each agent loads its skill list at startup and reports it via the health endpoint. Shared skills (task-processing, workspace-output, logging, gemini-flash) are common to all agents; custom skills are agent-specific.
+
+---
+
 ## Dynamic Agent Creation
 
 STAN can create new agents at runtime using `/opt/stan/create-agent.sh`.

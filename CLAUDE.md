@@ -44,6 +44,19 @@ STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardra
 - ORACLE (Opus 4.6): Orchestrator-routed tasks requiring advanced reasoning. Each call is stateless with full context. Token-budgeted and logged.
 - Claude Code can override, audit, or shut down any layer below it at any time.
 
+## Health Monitoring
+- Every agent exposes a `/health` endpoint (containers on :3001, sentry on :3000, oracle on :3002)
+- Health returns: status, last_task_at, current_task, api_key_valid, loaded_skills, uptime_seconds
+- Orchestrator polls all agents every 30s, writes combined status to `/opt/stan/workspace/agent-status.json`
+- Clark watches agent-status.json and syncs to Supabase `agent_status` table
+- Oracle writes `health.json` to its directory (read by orchestrator since it's host-side, not reachable via Docker network)
+
+## Skills Registry
+- Skills defined in `/opt/stan/skills/registry.json` — maps agents to their capabilities
+- Shared skill definitions describe common patterns (task-processing, workspace-output, logging, gemini-flash)
+- Each agent loads its skills from the registry at startup
+- New agents created via `create-agent.sh` inherit skills from their registry entry
+
 ## Escalation Triggers
 - Strategic misalignment detected
 - Blocking dependency outside your control

@@ -11,6 +11,7 @@ import { watch } from 'chokidar';
 import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { createServer } from 'http';
 import path from 'path';
 
 const exec = promisify(execFile);
@@ -19,7 +20,14 @@ const ORACLE_DIR = path.dirname(new URL(import.meta.url).pathname);
 const TASK_FILE = path.join(ORACLE_DIR, 'current-task.json');
 const OUTBOX = path.resolve(ORACLE_DIR, '../../workspace/outbox');
 const LOGS_DIR = path.join(ORACLE_DIR, 'logs');
+const SKILLS_FILE = path.resolve(ORACLE_DIR, '../../skills/registry.json');
+const HEALTH_FILE = path.join(ORACLE_DIR, 'health.json');
 const TOKEN_WARN_THRESHOLD = 10000;
+
+const startTime = Date.now();
+let lastTaskAt = null;
+let currentTask = null;
+let loadedSkills = [];
 
 async function log(message) {
   const timestamp = new Date().toISOString();
@@ -27,6 +35,41 @@ async function log(message) {
   const logFile = path.join(LOGS_DIR, `oracle-${new Date().toISOString().split('T')[0]}.log`);
   await writeFile(logFile, entry, { flag: 'a' }).catch(() => {});
   console.log(entry.trim());
+}
+
+async function loadSkills() {
+  try {
+    const registry = JSON.parse(await readFile(SKILLS_FILE, 'utf-8'));
+    loadedSkills = registry.agents.oracle?.skills || [];
+  } catch { loadedSkills = []; }
+}
+
+function getHealthData() {
+  return {
+    agent: 'oracle',
+    status: 'ok',
+    last_task_at: lastTaskAt,
+    current_task: currentTask,
+    api_key_valid: true,
+    loaded_skills: loadedSkills,
+    uptime_seconds: Math.floor((Date.now() - startTime) / 1000)
+  };
+}
+
+async function writeHealthFile() {
+  await writeFile(HEALTH_FILE, JSON.stringify(getHealthData(), null, 2)).catch(() => {});
+}
+
+function startHealthServer() {
+  createServer((req, res) => {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getHealthData()));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  }).listen(3002, '0.0.0.0');
 }
 
 async function logUsage(task, result, durationMs) {
@@ -62,7 +105,11 @@ function buildPrompt(task) {
 
 async function executeOracle(task) {
   const prompt = buildPrompt(task);
-  const startTime = Date.now();
+  const startOp = Date.now();
+
+  currentTask = task.description || task.type || 'unknown';
+  lastTaskAt = new Date().toISOString();
+  await writeHealthFile();
 
   await log(`Executing ORACLE task: ${task.type || 'unknown'} from ${task._source_file || 'direct'}`);
 
@@ -73,7 +120,7 @@ async function executeOracle(task) {
       env: { ...process.env }
     });
 
-    const durationMs = Date.now() - startTime;
+    const durationMs = Date.now() - startOp;
     let result;
 
     try {
@@ -92,6 +139,9 @@ async function executeOracle(task) {
     await logUsage(task, result, durationMs);
     await log(`ORACLE completed in ${durationMs}ms`);
 
+    currentTask = null;
+    await writeHealthFile();
+
     return {
       _agent: 'oracle',
       _model: 'claude-opus-4-6',
@@ -104,9 +154,12 @@ async function executeOracle(task) {
     };
 
   } catch (err) {
-    const durationMs = Date.now() - startTime;
+    const durationMs = Date.now() - startOp;
     await log(`ORACLE execution failed after ${durationMs}ms: ${err.message}`);
     await logUsage(task, null, durationMs);
+
+    currentTask = null;
+    await writeHealthFile();
 
     return {
       _agent: 'oracle',
@@ -144,7 +197,13 @@ async function main() {
   await mkdir(LOGS_DIR, { recursive: true });
   await mkdir(OUTBOX, { recursive: true });
 
-  await log('ORACLE runner starting — watching for tasks...');
+  await loadSkills();
+  startHealthServer();
+  await writeHealthFile();
+  await log('ORACLE runner starting — health on :3002, watching for tasks...');
+
+  // Update health file periodically
+  setInterval(writeHealthFile, 15000);
 
   const watcher = watch(TASK_FILE, {
     ignoreInitial: false,

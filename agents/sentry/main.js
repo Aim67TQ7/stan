@@ -18,12 +18,24 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
 const activeCrons = [];
 
+const startTime = Date.now();
+let lastTaskAt = null;
+let currentTask = null;
+let loadedSkills = [];
+
 async function log(message) {
   const timestamp = new Date().toISOString();
   const entry = `[${timestamp}] [${AGENT_NAME}] ${message}\n`;
   const logFile = path.join(LOGS, `${AGENT_NAME}-${timestamp.split('T')[0]}.log`);
   await writeFile(logFile, entry, { flag: 'a' }).catch(() => {});
   console.log(entry.trim());
+}
+
+async function loadSkills() {
+  try {
+    const registry = JSON.parse(await readFile('/app/skills/registry.json', 'utf-8'));
+    loadedSkills = registry.agents[AGENT_NAME]?.skills || [];
+  } catch { loadedSkills = []; }
 }
 
 async function loadSystemPrompt() {
@@ -212,8 +224,18 @@ function startWebhookServer(handlers) {
     res.json({ status: 'accepted', hook: hookName });
   });
 
+  // Health endpoint with full status
   app.get('/health', (req, res) => {
-    res.json({ agent: AGENT_NAME, status: 'ok', uptime: process.uptime() });
+    res.json({
+      agent: AGENT_NAME,
+      status: 'ok',
+      last_task_at: lastTaskAt,
+      current_task: currentTask,
+      api_key_valid: !!process.env.GEMINI_API_KEY,
+      loaded_skills: loadedSkills,
+      active_crons: activeCrons.length,
+      uptime_seconds: Math.floor((Date.now() - startTime) / 1000)
+    });
   });
 
   app.listen(3000, '0.0.0.0', () => {
@@ -222,30 +244,37 @@ function startWebhookServer(handlers) {
 }
 
 async function processTask(task) {
+  currentTask = task.description || task.type || 'unknown';
+  lastTaskAt = new Date().toISOString();
   await log(`Processing direct task: ${task.type || 'unknown'} — ${task.description || ''}`);
 
-  const systemPrompt = await loadSystemPrompt();
-  const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what webhook or cron configuration is needed.`;
+  try {
+    const systemPrompt = await loadSystemPrompt();
+    const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what webhook or cron configuration is needed.`;
 
-  const result = await model.generateContent(prompt);
-  const response = result.response.text();
+    const result = await model.generateContent(prompt);
+    const response = result.response.text();
 
-  const output = {
-    agent: AGENT_NAME,
-    task_source: task._source_file || 'unknown',
-    trigger: 'direct',
-    result: response,
-    completed_at: new Date().toISOString()
-  };
+    const output = {
+      agent: AGENT_NAME,
+      task_source: task._source_file || 'unknown',
+      trigger: 'direct',
+      result: response,
+      completed_at: new Date().toISOString()
+    };
 
-  const outFile = path.join(WORKSPACE, 'outbox', `${AGENT_NAME}-${Date.now()}.json`);
-  await mkdir(path.join(WORKSPACE, 'outbox'), { recursive: true });
-  await writeFile(outFile, JSON.stringify(output, null, 2));
-  await log(`Task complete. Output: ${outFile}`);
+    const outFile = path.join(WORKSPACE, 'outbox', `${AGENT_NAME}-${Date.now()}.json`);
+    await mkdir(path.join(WORKSPACE, 'outbox'), { recursive: true });
+    await writeFile(outFile, JSON.stringify(output, null, 2));
+    await log(`Task complete. Output: ${outFile}`);
+  } finally {
+    currentTask = null;
+  }
 }
 
 async function main() {
   await log('Sentry agent starting...');
+  await loadSkills();
 
   // Load webhook handlers and start HTTP server
   const handlers = await loadHookHandlers();
