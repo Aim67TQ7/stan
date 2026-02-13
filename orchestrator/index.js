@@ -28,7 +28,16 @@ const AGENT_ROUTES = {
   draft: 'maggie',
   communication: 'maggie',
   letter: 'maggie',
-  respond: 'maggie'
+  respond: 'maggie',
+  supabase: 'clark',
+  query: 'clark',
+  upload: 'clark',
+  'task-write': 'clark',
+  database: 'clark',
+  webhook: 'sentry',
+  cron: 'sentry',
+  schedule: 'sentry',
+  hook: 'sentry'
 };
 
 async function log(message) {
@@ -55,12 +64,14 @@ function routeTask(task) {
 }
 
 async function classifyWithOpenClaw(task) {
-  const prompt = `You are a task router. Given this task, respond with ONLY one word: magnus, pete, caesar, or maggie.
+  const prompt = `You are a task router. Given this task, respond with ONLY one word: magnus, pete, caesar, maggie, clark, or sentry.
 
 magnus = equipment/technical questions about Bunting Magnetics
 pete = document reconstruction, formatting, PDF processing
 caesar = Epicor ERP, orders, customer service, BAQ queries
 maggie = drafting emails, letters, communications
+clark = Supabase database queries, task writes, PDF uploads to storage
+sentry = webhooks, cron scheduling, periodic HTTP calls
 
 Task: ${JSON.stringify(task)}
 
@@ -72,7 +83,7 @@ Agent:`;
       env: { ...process.env }
     });
     const agent = stdout.trim().toLowerCase().split('\n').pop().trim();
-    if (['magnus', 'pete', 'caesar', 'maggie'].includes(agent)) {
+    if (['magnus', 'pete', 'caesar', 'maggie', 'clark', 'sentry'].includes(agent)) {
       return agent;
     }
   } catch (err) {

@@ -93,3 +93,43 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 - Drafts only — never sends communications directly
 - All drafts require human review before delivery
 - Cannot access agent directories directly; works from workspace copies only
+
+---
+
+## Clark - Supabase Specialist
+
+**Role:** Handles all Supabase database interactions — reads, task writes, and PDF storage uploads.
+
+**Scope:**
+- READ from any Supabase table
+- WRITE only to the `tasks` table (insert/update)
+- UPLOAD completed PDFs to Supabase storage buckets
+- Tracks uploads locally in `/agents/clark/uploads`
+- Stages query results in workspace for other agents
+
+**Boundaries:**
+- READ-ONLY on all tables except `tasks`
+- Internet access granted (needs Supabase API access)
+- NEVER delete rows or drop tables
+- Credentials come from SUPABASE_URL and SUPABASE_SERVICE_KEY env vars — never log or expose them
+- Must log all Supabase operations
+
+---
+
+## Sentry - Webhook Responder & Cron Scheduler
+
+**Role:** Listens for incoming webhooks and runs scheduled HTTPS calls.
+
+**Scope:**
+- HTTP server on port 3000 for incoming webhooks
+- Converts webhook payloads into tasks routed through the orchestrator
+- Runs cron-scheduled HTTPS calls (primarily to `sentient.gp3.app`)
+- Handler definitions in `/agents/sentry/hooks`
+- Cron definitions in `/agents/sentry/cron`
+
+**Boundaries:**
+- Internet access granted (needs outbound HTTPS)
+- Outbound calls restricted to URLs defined in cron/hook configs
+- Never exposes internal task data in webhook responses
+- All payloads and cron results logged
+- Does not call back to webhook senders unless explicitly configured

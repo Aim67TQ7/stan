@@ -1,0 +1,12 @@
+{
+  "name": "stan-agent-clark",
+  "version": "1.0.0",
+  "description": "Clark - Supabase Specialist Agent",
+  "main": "main.js",
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "chokidar": "^4.0.0"
+  }
+}
