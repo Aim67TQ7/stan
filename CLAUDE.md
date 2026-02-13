@@ -21,18 +21,18 @@ Robert Clausing - Operations Manager, Bunting Magnetics / n0v8v LLC
 - Docker containers are sandboxed — no root access to host
 
 ## Architecture
-- Orchestrator: Claude Code at /opt/stan
-- Containers: Docker-based agents, each scoped to a specific function
+- Root Authority: Claude Code at /opt/stan — Robert's direct interface
+- Orchestrator (STAN): Gemini Flash 2.0 in Docker container — manages agents, runs operations
+- Container Agents: Gemini Flash 2.0 — task execution, scoped functions
 - Git: https://github.com/Aim67TQ7/stan.git
+
+## Model Strategy
+- Claude Code (Opus 4.6): NOT autonomous. Robert's master key for oversight, auditing, and architecture decisions.
+- Gemini Flash 2.0: Powers STAN orchestrator and all container agents. Handles volume work.
+- Claude Code can override, audit, or shut down any layer below it at any time.
 
 ## Escalation Triggers
 - Strategic misalignment detected
 - Blocking dependency outside your control
 - Cost/security implications above threshold
 - Ambiguity that materially affects outcome
-
-## Model Strategy
-- Root Authority: Claude Code (Opus 4.6) — Robert's direct interface, oversight, auditing, architecture decisions. NOT autonomous.
-- Orchestrator (STAN): Gemini Flash 2.0 — manages container agents, runs operations
-- Container Agents: Gemini Flash 2.0 — task execution, scoped functions
-- Claude Code can override, audit, or shut down any layer below it at any time
