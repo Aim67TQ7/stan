@@ -1,5 +1,5 @@
 import { watch } from 'chokidar';
-import { readFile, writeFile, rename, mkdir } from 'fs/promises';
+import { readFile, writeFile, readdir, rename, mkdir } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
@@ -8,6 +8,7 @@ const exec = promisify(execFile);
 
 const INBOX = '/app/workspace/inbox';
 const OUTBOX = '/app/workspace/outbox';
+const PROCESSED = '/app/workspace/processed';
 const LOGS = '/app/logs';
 const AGENTS_DIR = '/app/agents';
 const STATUS_FILE = '/app/workspace/agent-status.json';
@@ -208,7 +209,103 @@ async function dispatchToAgent(agentName, task, filename) {
 
   await writeFile(taskFile, JSON.stringify(enrichedTask, null, 2));
   await log(`Dispatched "${task.type || 'unknown'}" task to ${agentName}: ${filename}`);
+
+  // Update task status to in_progress via Clark
+  if (task.id) {
+    await requestClarkUpdate(task.id, 'in_progress');
+  }
 }
+
+// --- Status Updates via Clark ---
+
+async function requestClarkUpdate(taskId, status) {
+  const updateTask = {
+    type: 'task-write',
+    record: { id: taskId, status },
+    _source: 'orchestrator-status-update',
+    _routed_by: 'stan-orchestrator'
+  };
+  const clarkTaskFile = path.join(AGENTS_DIR, 'clark', 'current-task.json');
+  await writeFile(clarkTaskFile, JSON.stringify(updateTask, null, 2));
+}
+
+// --- Multi-Agent Workflows ---
+
+async function decomposeTask(task) {
+  const prompt = `You are a task decomposition engine for a multi-agent system. Given a complex task, break it into sequential subtasks.
+
+Available agents:
+- magnus: equipment/technical knowledge about Bunting Magnetics
+- pete: document reconstruction, formatting, PDF processing
+- caesar: Epicor ERP queries, orders, customer service
+- maggie: drafting emails, letters, communications
+- clark: Supabase database operations, file uploads
+- scout: web research, investigation
+- oracle: complex reasoning, architecture, code review
+
+Respond with ONLY valid JSON — an array of objects: [{"agent":"name","description":"subtask description","depends_on":null}]
+If depends_on references a previous subtask, use its 0-based index (e.g. 1 depends on 0).
+Maximum 5 subtasks. If the task is simple enough for one agent, return a single-element array.
+
+Task: ${JSON.stringify({ type: task.type, description: task.description, context: task.context || task.payload || {} })}
+
+Subtasks:`;
+
+  try {
+    const { stdout } = await exec('openclaw', ['agent', '--message', prompt], {
+      timeout: 30000,
+      env: { ...process.env }
+    });
+
+    // Extract JSON from response
+    const jsonMatch = stdout.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return null;
+
+    const subtasks = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(subtasks) || subtasks.length === 0 || subtasks.length > 5) return null;
+
+    return subtasks;
+  } catch (err) {
+    await log(`Decomposition failed: ${err.message}`);
+    return null;
+  }
+}
+
+async function executeWorkflow(task, filename) {
+  const subtasks = await decomposeTask(task);
+  if (!subtasks || subtasks.length <= 1) return false;
+
+  await log(`WORKFLOW: Decomposed into ${subtasks.length} subtasks for ${filename}`);
+
+  for (let i = 0; i < subtasks.length; i++) {
+    const sub = subtasks[i];
+    const agent = sub.agent;
+
+    if (!['magnus', 'pete', 'caesar', 'maggie', 'clark', 'scout', 'oracle', 'sentry'].includes(agent)) {
+      await log(`WORKFLOW: Invalid agent "${agent}" in subtask ${i}, skipping`);
+      continue;
+    }
+
+    const subtaskData = {
+      ...task,
+      type: sub.type || task.type || 'general',
+      description: sub.description,
+      _workflow: true,
+      _workflow_step: i + 1,
+      _workflow_total: subtasks.length,
+      _parent_task_id: task.id || null,
+      _source_file: filename
+    };
+
+    const subFilename = `workflow-${filename.replace('.json', '')}-step${i + 1}.json`;
+    await dispatchToAgent(agent, subtaskData, subFilename);
+    await log(`WORKFLOW: Step ${i + 1}/${subtasks.length} → ${agent}: ${sub.description.slice(0, 80)}`);
+  }
+
+  return true;
+}
+
+// --- Task Processing ---
 
 async function processTask(filepath) {
   const filename = path.basename(filepath);
@@ -219,6 +316,16 @@ async function processTask(filepath) {
 
     await log(`New task received: ${filename}`);
 
+    // Check if task is explicitly a multi-agent workflow
+    if (task.workflow === true || task.type === 'workflow') {
+      const handled = await executeWorkflow(task, filename);
+      if (handled) {
+        await mkdir(PROCESSED, { recursive: true });
+        await rename(filepath, path.join(PROCESSED, filename));
+        return;
+      }
+    }
+
     // Step 1: keyword routing
     let agent = routeTask(task);
 
@@ -226,6 +333,17 @@ async function processTask(filepath) {
     if (!agent) {
       await log(`Keyword routing failed for ${filename}, using OpenClaw classification`);
       agent = await classifyWithOpenClaw(task);
+    }
+
+    // Step 3: if still unroutable, try decomposition for complex tasks
+    if (!agent && task.description && task.description.length > 200) {
+      await log(`Attempting workflow decomposition for ${filename}`);
+      const handled = await executeWorkflow(task, filename);
+      if (handled) {
+        await mkdir(PROCESSED, { recursive: true });
+        await rename(filepath, path.join(PROCESSED, filename));
+        return;
+      }
     }
 
     if (!agent) {
@@ -238,13 +356,35 @@ async function processTask(filepath) {
     await dispatchToAgent(agent, task, filename);
 
     // Move processed file out of inbox
-    const processedDir = path.join(INBOX, '../processed');
-    await mkdir(processedDir, { recursive: true });
-    await rename(filepath, path.join(processedDir, filename));
+    await mkdir(PROCESSED, { recursive: true });
+    await rename(filepath, path.join(PROCESSED, filename));
 
   } catch (err) {
     await log(`ERROR processing ${filename}: ${err.message}`);
   }
+}
+
+// --- Inbox Polling (Level 3) ---
+
+async function pollInbox() {
+  try {
+    const files = await readdir(INBOX);
+    const jsonFiles = files.filter(f => f.endsWith('.json'));
+    if (jsonFiles.length === 0) return;
+
+    await log(`POLL: Found ${jsonFiles.length} unprocessed inbox file(s)`);
+    for (const f of jsonFiles) {
+      await processTask(path.join(INBOX, f));
+    }
+  } catch {
+    // inbox might not exist yet
+  }
+}
+
+function startInboxPoller() {
+  setInterval(() => {
+    pollInbox().catch(err => log(`Inbox poll error: ${err.message}`));
+  }, 30000);
 }
 
 async function main() {
@@ -255,6 +395,13 @@ async function main() {
   // Start health monitor (polls every 30s, writes agent-status.json)
   startHealthMonitor();
   await log('Health monitor started — polling every 30s');
+
+  // Level 3: poll inbox every 30s as backup to file watcher
+  startInboxPoller();
+  await log('Inbox poller started — checking every 30s');
+
+  // Process any existing inbox files immediately
+  await pollInbox();
 
   const watcher = watch(INBOX, {
     ignoreInitial: false,

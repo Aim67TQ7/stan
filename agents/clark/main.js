@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
 import { watch } from 'chokidar';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, readdir, stat } from 'fs/promises';
 import { createServer } from 'http';
 import cronParser from 'cron-parser';
 import path from 'path';
@@ -13,6 +13,9 @@ const LOGS = '/app/logs';
 const UPLOADS_DIR = path.join(AGENT_DIR, 'uploads');
 const TASK_FILE = path.join(AGENT_DIR, 'current-task.json');
 const STATUS_FILE = path.join(WORKSPACE, 'agent-status.json');
+const OUTBOX_DIR = path.join(WORKSPACE, 'outbox');
+const PROCESSED_DIR = path.join(OUTBOX_DIR, 'processed');
+const INBOX_PROCESSED_DIR = path.join(WORKSPACE, 'processed');
 
 const WRITABLE_TABLES = ['tasks', 'agent_status', 'agent_activity', 'scheduled_tasks'];
 
@@ -232,7 +235,7 @@ async function pollScheduledTasks() {
       .from('scheduled_tasks')
       .select('*')
       .eq('enabled', true)
-      .lte('next_run_at', now);
+      .lte('next_run', now);
 
     if (error) {
       await log(`SCHEDULER ERROR: ${error.message}`);
@@ -264,8 +267,8 @@ async function pollScheduledTasks() {
       // Compute next run and update record
       const nextRun = computeNextRun(scheduled.schedule);
       await supabase.from('scheduled_tasks').update({
-        last_run_at: now,
-        next_run_at: nextRun,
+        last_run: now,
+        next_run: nextRun,
         updated_at: now
       }).eq('id', scheduled.id);
 
@@ -288,6 +291,210 @@ function startScheduler() {
   setInterval(() => {
     pollScheduledTasks().catch(err => log(`Scheduler error: ${err.message}`));
   }, 60000);
+}
+
+// --- Outbox Watcher (sync results back to Supabase) ---
+
+async function resolveTaskId(result) {
+  // 1. Direct task_id in result
+  if (result.task_id) return result.task_id;
+
+  // 2. Look up the processed inbox file by task_source filename
+  const sourceFile = result.task_source;
+  if (!sourceFile || sourceFile === 'unknown') return null;
+
+  try {
+    const raw = await readFile(path.join(INBOX_PROCESSED_DIR, sourceFile), 'utf-8');
+    const task = JSON.parse(raw);
+    return task.id || null;
+  } catch {
+    return null;
+  }
+}
+
+const MIME_MAP = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.json': 'application/json',
+  '.csv': 'text/csv',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.html': 'text/html',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+};
+
+function detectDeliverableType(ext) {
+  if (['.pdf'].includes(ext)) return 'pdf';
+  if (['.mp3', '.wav', '.ogg', '.flac'].includes(ext)) return 'audio';
+  if (['.mp4', '.webm', '.mov'].includes(ext)) return 'video';
+  if (['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'].includes(ext)) return 'image';
+  if (['.csv', '.xlsx', '.docx', '.txt', '.md', '.html'].includes(ext)) return 'document';
+  return 'file';
+}
+
+async function uploadDeliverable(filepath, bucket = 'deliverables') {
+  if (!supabase) return null;
+
+  const filename = path.basename(filepath);
+  const ext = path.extname(filename).toLowerCase();
+  const contentType = MIME_MAP[ext] || 'application/octet-stream';
+  const deliverableType = detectDeliverableType(ext);
+
+  try {
+    const fileBuffer = await readFile(filepath);
+    const storagePath = `${Date.now()}-${filename}`;
+
+    const { data, error } = await supabase.storage.from(bucket).upload(storagePath, fileBuffer, {
+      contentType,
+      upsert: true
+    });
+
+    if (error) {
+      await log(`DELIVERABLE UPLOAD ERROR: ${error.message}`);
+      return null;
+    }
+
+    const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(storagePath);
+
+    await log(`DELIVERABLE: Uploaded ${filename} → ${bucket}/${storagePath}`);
+    return {
+      type: deliverableType,
+      url: urlData.publicUrl,
+      filename,
+      content_type: contentType,
+      storage_path: `${bucket}/${storagePath}`
+    };
+  } catch (err) {
+    await log(`DELIVERABLE UPLOAD FAILED: ${err.message}`);
+    return null;
+  }
+}
+
+async function processOutboxFile(filepath) {
+  if (!supabase) return;
+
+  const filename = path.basename(filepath);
+
+  // Skip clark's own output files to avoid feedback loops
+  if (filename.startsWith('clark-')) return;
+
+  try {
+    const raw = await readFile(filepath, 'utf-8');
+    const result = JSON.parse(raw);
+
+    const taskId = await resolveTaskId(result);
+
+    if (!taskId) {
+      await log(`OUTBOX: No task ID found for ${filename} — skipping Supabase update`);
+    } else {
+      // Fetch existing task to append to updates array
+      const { data: existing, error: fetchErr } = await supabase
+        .from('tasks')
+        .select('updates')
+        .eq('id', taskId)
+        .single();
+
+      if (fetchErr) {
+        await log(`OUTBOX: Failed to fetch task ${taskId}: ${fetchErr.message}`);
+      } else {
+        const updates = existing?.updates || [];
+
+        // Build the update entry
+        const updateEntry = {
+          agent: result.agent,
+          result: typeof result.result === 'string' ? result.result.slice(0, 4000) : result.result,
+          confidence: result.confidence || null,
+          sources: result.sources || null,
+          completed_at: result.completed_at || new Date().toISOString(),
+          deliverable: null
+        };
+
+        // Check for file deliverables — output_file or file_path in result
+        const filePath = result.output_file || result.file_path ||
+          (typeof result.result === 'object' && result.result?.file_path) || null;
+
+        if (filePath) {
+          try {
+            await stat(filePath);
+            const deliverable = await uploadDeliverable(filePath);
+            if (deliverable) {
+              updateEntry.deliverable = deliverable;
+              await log(`OUTBOX: Deliverable attached — ${deliverable.type}: ${deliverable.url}`);
+            }
+          } catch {
+            // File doesn't exist in container — may be a host path reference
+            await log(`OUTBOX: Deliverable file not accessible: ${filePath}`);
+          }
+        }
+
+        // If result itself is text content, mark as text deliverable
+        if (!updateEntry.deliverable && typeof result.result === 'string' && result.result.length > 0) {
+          updateEntry.deliverable = { type: 'text', content: result.result.slice(0, 8000) };
+        }
+
+        updates.push(updateEntry);
+
+        const { error: updateErr } = await supabase
+          .from('tasks')
+          .update({ updates, status: 'done' })
+          .eq('id', taskId);
+
+        if (updateErr) {
+          await log(`OUTBOX: Failed to update task ${taskId}: ${updateErr.message}`);
+        } else {
+          await log(`OUTBOX: Task ${taskId} updated — status=done, ${updates.length} update(s), deliverable=${updateEntry.deliverable?.type || 'none'}`);
+        }
+      }
+    }
+
+    // Move to processed regardless (so we don't reprocess)
+    await mkdir(PROCESSED_DIR, { recursive: true });
+    await rename(filepath, path.join(PROCESSED_DIR, filename));
+    await log(`OUTBOX: ${filename} → processed/`);
+  } catch (err) {
+    await log(`OUTBOX ERROR [${filename}]: ${err.message}`);
+  }
+}
+
+async function processExistingOutbox() {
+  try {
+    const files = await readdir(OUTBOX_DIR);
+    const jsonFiles = files.filter(f => f.endsWith('.json'));
+    if (jsonFiles.length === 0) return;
+
+    await log(`OUTBOX: Found ${jsonFiles.length} existing file(s) to process`);
+    for (const f of jsonFiles) {
+      await processOutboxFile(path.join(OUTBOX_DIR, f));
+    }
+  } catch (err) {
+    await log(`OUTBOX: Error scanning existing files: ${err.message}`);
+  }
+}
+
+function watchOutbox() {
+  const watcher = watch(OUTBOX_DIR, {
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+    ignored: [/processed\//, /^\./]
+  });
+
+  watcher.on('add', async (filepath) => {
+    if (!filepath.endsWith('.json')) return;
+    // Ignore files inside processed/ subdirectory
+    if (filepath.includes('/processed/')) return;
+    await processOutboxFile(filepath);
+  });
+
+  return watcher;
 }
 
 // --- Task Processing ---
@@ -384,6 +591,11 @@ async function main() {
   startScheduler();
   await log('Scheduled tasks poller started — checking every 60s');
 
+  // Process any existing outbox files, then watch for new ones
+  await processExistingOutbox();
+  const outboxWatcher = watchOutbox();
+  await log('Watching workspace/outbox/ for agent results');
+
   const watcher = watch(TASK_FILE, {
     ignoreInitial: false,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 }
@@ -407,6 +619,7 @@ async function main() {
   process.on('SIGTERM', async () => {
     await log('Shutting down');
     await statusWatcher.close();
+    await outboxWatcher.close();
     await watcher.close();
     process.exit(0);
   });

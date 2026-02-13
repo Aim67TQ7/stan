@@ -38,14 +38,16 @@
       }
     },
     "clark": {
-      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "supabase-read", "supabase-write", "file-upload", "status-sync", "activity-logging", "scheduled-tasks"],
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "supabase-read", "supabase-write", "file-upload", "status-sync", "activity-logging", "scheduled-tasks", "outbox-sync", "deliverable-upload"],
       "custom": {
         "supabase-read": { "description": "SELECT queries from any Supabase table with filters" },
         "supabase-write": { "description": "UPSERT records to tasks, agent_status, agent_activity, scheduled_tasks" },
         "file-upload": { "description": "Upload PDFs to Supabase storage buckets" },
         "status-sync": { "description": "Watch agent-status.json and sync to Supabase agent_status table" },
         "activity-logging": { "description": "Log agent activity to agent_activity table with user context" },
-        "scheduled-tasks": { "description": "Poll and dispatch scheduled tasks from Supabase every 60s" }
+        "scheduled-tasks": { "description": "Poll and dispatch scheduled tasks from Supabase every 60s" },
+        "outbox-sync": { "description": "Watch outbox for agent results, update Supabase tasks with responses, move to processed" },
+        "deliverable-upload": { "description": "Upload file deliverables (PDF, audio, images) to Supabase storage with public URLs" }
       }
     },
     "scout": {
@@ -57,11 +59,13 @@
       }
     },
     "sentry": {
-      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "webhook-server", "cron-scheduler", "task-routing"],
+      "skills": ["task-processing", "workspace-output", "logging", "gemini-flash", "webhook-server", "cron-scheduler", "task-routing", "inbox-poller", "stan-chat"],
       "custom": {
         "webhook-server": { "description": "Express HTTP server on port 3000 for incoming webhooks" },
         "cron-scheduler": { "description": "node-cron scheduled HTTPS calls from JSON definitions" },
-        "task-routing": { "description": "Convert Supabase webhook payloads into routable orchestrator tasks" }
+        "task-routing": { "description": "Convert Supabase webhook payloads into routable orchestrator tasks" },
+        "inbox-poller": { "description": "Poll Supabase tasks table every 30s for status=inbox, dispatch to orchestrator" },
+        "stan-chat": { "description": "Direct synchronous chat with STAN via POST /chat/stan endpoint" }
       }
     },
     "oracle": {

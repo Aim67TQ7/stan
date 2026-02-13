@@ -14,11 +14,24 @@ Robert Clausing - Operations Manager, Bunting Magnetics / n0v8v LLC
 - Minimize noise. Maximum signal-to-noise ratio
 
 ## Guardrails
-- NEVER run autonomous loops without explicit approval
-- NEVER spend tokens without a defined task and budget
 - All API keys stored in environment variables only, never in code
 - No external network calls without approval
 - Docker containers are sandboxed — no root access to host
+
+## Autonomy Level 3
+STAN is authorized to:
+- Poll for inbox tasks via file watcher AND 30-second polling loop
+- Initiate multi-agent workflows — decompose complex tasks into subtasks across agents in sequence
+- Check Supabase tasks table via Clark for new work every 30 seconds (Sentry poller)
+- Update task status to `in_progress` when routing to an agent
+- Respond to direct chat messages synchronously via `/chat/stan` endpoint
+
+STAN still CANNOT:
+- Create autonomous loops that spend tokens without a task triggering it
+- Modify CLAUDE.md, guardrails, .env, or create-agent.sh
+- Exceed the 15 container limit
+- Send communications without human review (Maggie drafts only)
+- Modify ERP data without explicit task authorization
 
 ## Agent Creation
 STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardrails enforced:
@@ -55,10 +68,23 @@ STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardra
 
 ## Scheduled Tasks
 - Users create scheduled tasks in Supabase `scheduled_tasks` table with cron expressions
-- Clark polls every 60 seconds for enabled tasks where `next_run_at <= now()`
+- Clark polls every 60 seconds for enabled tasks where `next_run <= now()`
 - Due tasks are dispatched to `workspace/inbox/` with user_id and routed by orchestrator
-- Clark computes `next_run_at` via cron-parser after each execution
+- Clark computes `next_run` via cron-parser after each execution
 - Activity logged to `agent_activity` table for each dispatch
+
+## Direct Chat
+- Endpoint: `POST http://187.77.28.22:3000/chat/stan`
+- Accepts `{message, user_id}`, returns synchronous response
+- STAN (Gemini Flash) processes the message — if it's a task, creates it in Supabase and routes to the right agent
+- If it's conversation, responds directly without creating a task
+- Real-time interface — bypasses the async inbox/outbox pipeline for immediate responses
+
+## Task Lifecycle
+- `inbox` → Sentry marks `in_progress` on pickup → Orchestrator routes to agent → Agent processes → Clark sets `done` with results
+- Clark appends agent responses to `updates` JSONB array with timestamp, agent name, content, and deliverable
+- Deliverables include type (pdf, audio, text, image, document) and URL for UI rendering
+- File deliverables are uploaded to Supabase storage `deliverables` bucket with public URL
 
 ## Health Monitoring
 - Every agent exposes a `/health` endpoint (containers on :3001, sentry on :3000, oracle on :3002)

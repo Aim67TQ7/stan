@@ -6,22 +6,26 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
-## stan-orchestrator
+## stan-orchestrator (Level 3 Autonomy)
 
-**Role:** Router, task manager, and authority layer for all agents.
+**Role:** Router, task manager, authority layer, and workflow orchestrator for all agents.
 
 **Scope:**
-- Receives tasks from Claude Code or scheduled triggers
-- Decomposes work and delegates to the appropriate agent(s)
+- Receives tasks from Claude Code, Supabase (via Sentry), scheduled triggers, or direct chat
+- Decomposes complex tasks into multi-agent workflows (up to 5 sequential subtasks)
+- Delegates to the appropriate agent(s) and updates task status to `in_progress` via Clark
+- Polls inbox every 30 seconds as backup to chokidar file watcher
 - Monitors agent status and enforces completion
 - Logs decisions and exceptions to `/logs`
 - Has read/write access to all agent directories and workspace
 
 **Boundaries:**
-- Cannot initiate work without a defined task
+- Cannot create autonomous loops that spend tokens without a task triggering it
 - Cannot make external API calls directly
 - Must escalate to Claude Code on strategic misalignment, cost concerns, or ambiguity
 - No internet access (internal network only)
+- Cannot modify CLAUDE.md, guardrails, .env, or create-agent.sh
+- Cannot exceed 15 container limit
 
 ---
 
@@ -96,19 +100,24 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
-## Clark - Supabase Specialist
+## Clark - Supabase Specialist & Result Pipeline
 
-**Role:** Handles all Supabase database interactions — reads, task writes, and PDF storage uploads.
+**Role:** Handles all Supabase database interactions, watches outbox for agent results, uploads deliverables, and closes the task lifecycle loop.
 
 **Scope:**
 - READ from any Supabase table
-- WRITE only to the `tasks` table (insert/update)
-- UPLOAD completed PDFs to Supabase storage buckets
+- WRITE to `tasks`, `agent_status`, `agent_activity`, `scheduled_tasks`
+- UPLOAD files to Supabase storage buckets (deliverables, completed-pdfs)
+- Watches `workspace/outbox/` for agent results via chokidar
+- On result: appends to task `updates` JSONB array with agent name, content, timestamp, and deliverable
+- Deliverables include type (pdf, audio, text, image, document, link) and public URL for UI rendering
+- File deliverables automatically uploaded to Supabase storage `deliverables` bucket
+- Sets task status to `done` when result is written
+- Watches `agent-status.json` and syncs to Supabase `agent_status` table
+- Polls `scheduled_tasks` every 60s and dispatches due tasks
 - Tracks uploads locally in `/agents/clark/uploads`
-- Stages query results in workspace for other agents
 
 **Boundaries:**
-- READ-ONLY on all tables except `tasks`
 - Internet access granted (needs Supabase API access)
 - NEVER delete rows or drop tables
 - Credentials come from SUPABASE_URL and SUPABASE_SERVICE_KEY env vars — never log or expose them
@@ -136,23 +145,28 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
-## Sentry - Webhook Responder & Cron Scheduler
+## Sentry - Webhook Responder, Cron Scheduler & Chat Gateway
 
-**Role:** Listens for incoming webhooks and runs scheduled HTTPS calls.
+**Role:** Listens for incoming webhooks, runs scheduled HTTPS calls, polls Supabase for new tasks, and provides direct chat with STAN.
 
 **Scope:**
-- HTTP server on port 3000 for incoming webhooks
-- Converts webhook payloads into tasks routed through the orchestrator
-- Runs cron-scheduled HTTPS calls (primarily to `sentient.gp3.app`)
+- HTTP server on port 3000 for incoming webhooks and chat
+- `POST /hook/new-task` — Supabase webhook receiver for new tasks
+- `POST /hook/:name` — generic webhook handlers
+- `POST /chat/stan` — direct real-time chat with STAN (accepts `{message, user_id}`)
+- Polls Supabase `tasks` table every 30s for `status='inbox'` items
+- Converts webhook/poll payloads into tasks routed through the orchestrator
+- Marks tasks `in_progress` in Supabase on pickup (prevents re-polling)
+- Runs cron-scheduled HTTPS calls from JSON definitions
 - Handler definitions in `/agents/sentry/hooks`
 - Cron definitions in `/agents/sentry/cron`
 
 **Boundaries:**
-- Internet access granted (needs outbound HTTPS)
-- Outbound calls restricted to URLs defined in cron/hook configs
+- Internet access granted (needs outbound HTTPS + Supabase)
+- Outbound calls restricted to URLs defined in cron/hook configs + Supabase
+- Chat responses are synchronous — no task pipeline for conversation
 - Never exposes internal task data in webhook responses
-- All payloads and cron results logged
-- Does not call back to webhook senders unless explicitly configured
+- All payloads, cron results, and chat messages logged
 
 ---
 
