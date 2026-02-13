@@ -132,6 +132,47 @@ function startWebhookServer(handlers) {
   const app = express();
   app.use(express.json());
 
+  // Supabase tasks table webhook — extracts record and builds routable task
+  app.post('/hook/new-task', async (req, res) => {
+    const payload = req.body;
+    await log(`Supabase new-task webhook: ${JSON.stringify(payload).slice(0, 300)}`);
+
+    const record = payload.record;
+    if (!record) {
+      await log('new-task webhook: no record in payload');
+      return res.status(400).json({ status: 'error', message: 'No record in payload' });
+    }
+
+    const assignedTo = (record.assigned_to || 'ANY').toUpperCase();
+
+    // Map agent names to orchestrator-routable task types
+    const agentTypeMap = {
+      MAGNUS: 'equipment',
+      PETE: 'document',
+      CAESAR: 'epicor',
+      MAGGIE: 'email',
+      CLARK: 'supabase',
+      SENTRY: 'webhook',
+      SCOUT: 'research'
+    };
+
+    const taskData = {
+      id: record.id,
+      type: agentTypeMap[assignedTo] || record.type || 'general',
+      description: record.description || record.title || '',
+      priority: record.priority || 'normal',
+      assigned_to: assignedTo,
+      supabase_record: record,
+      _source: 'supabase-webhook',
+      _webhook_received: new Date().toISOString()
+    };
+
+    await dropTaskToInbox(taskData);
+    await log(`Supabase task ${record.id} → inbox (assigned_to: ${assignedTo})`);
+
+    res.json({ status: 'accepted', task_id: record.id });
+  });
+
   app.post('/hook/:name', async (req, res) => {
     const hookName = req.params.name;
     const payload = req.body;

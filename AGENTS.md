@@ -116,6 +116,26 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 
 ---
 
+## Scout - Research Specialist
+
+**Role:** Performs web research, investigates topics, and returns structured findings.
+
+**Scope:**
+- Searches the web using Gemini 2.0 Flash with Google Search grounding
+- Retrieves and extracts content from URLs
+- Synthesizes findings into structured markdown reports
+- Caches research results in `/agents/scout/cache/` (24hr TTL) to avoid redundant lookups
+- Returns reports with source citations and confidence ratings
+
+**Boundaries:**
+- Internet access granted (required for web searches)
+- Cannot access internal systems (Epicor, Supabase)
+- Cannot modify other agents' directories
+- Cannot send data externally — results go to outbox only
+- Must always cite sources
+
+---
+
 ## Sentry - Webhook Responder & Cron Scheduler
 
 **Role:** Listens for incoming webhooks and runs scheduled HTTPS calls.
@@ -133,3 +153,25 @@ All agents are powered by Gemini Flash 2.0, managed by the STAN orchestrator, an
 - Never exposes internal task data in webhook responses
 - All payloads and cron results logged
 - Does not call back to webhook senders unless explicitly configured
+
+---
+
+## Dynamic Agent Creation
+
+STAN can create new agents at runtime using `/opt/stan/create-agent.sh`.
+
+**Usage:**
+```bash
+./create-agent.sh <name> <display-name> <role> <description> <reason>
+```
+
+**Template:** All new agents are scaffolded from `/opt/stan/agent-template/` which includes a standard Dockerfile, main.js, package.json, and AGENT.md.
+
+**Guardrails:**
+- New agents join **stan-internal network only** — no internet access
+- No Supabase write access (only Clark has credentials/permissions)
+- Maximum **15 total containers** — hard limit enforced by script
+- Agents **cannot create other agents** — no recursion
+- Reserved names blocked (stan, orchestrator, claude, root, admin)
+- Every creation logged to `/opt/stan/logs/agent-creation.log`
+- STAN cannot modify CLAUDE.md, .env, guardrails, or the creation script itself

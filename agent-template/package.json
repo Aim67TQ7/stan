@@ -1,0 +1,11 @@
+{
+  "name": "stan-agent-AGENT_NAME",
+  "version": "1.0.0",
+  "description": "AGENT_DESCRIPTION",
+  "main": "main.js",
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "chokidar": "^4.0.0"
+  }
+}

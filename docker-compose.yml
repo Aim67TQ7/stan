@@ -127,6 +127,27 @@ services:
     depends_on:
       - stan-orchestrator
 
+  scout:
+    container_name: scout
+    build:
+      context: ./agents/scout
+      dockerfile: Dockerfile
+    working_dir: /app
+    volumes:
+      - ./agents/scout:/app/agent
+      - ./workspace:/app/workspace
+      - ./logs:/app/logs
+    env_file: .env
+    environment:
+      - ROLE=scout
+      - NODE_ENV=production
+    networks:
+      - stan-internal
+      - stan-external
+    restart: unless-stopped
+    depends_on:
+      - stan-orchestrator
+
   sentry:
     container_name: sentry
     build:

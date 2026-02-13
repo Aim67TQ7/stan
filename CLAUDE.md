@@ -20,10 +20,21 @@ Robert Clausing - Operations Manager, Bunting Magnetics / n0v8v LLC
 - No external network calls without approval
 - Docker containers are sandboxed — no root access to host
 
+## Agent Creation
+STAN can create new agents autonomously via `/opt/stan/create-agent.sh`. Guardrails enforced:
+- New agents get **internal network ONLY** — no internet by default
+- New agents **cannot** get Supabase write access (only Clark has that)
+- Maximum **15 total** agent containers — hard limit
+- STAN **cannot** modify CLAUDE.md, guardrails, .env, or create-agent.sh
+- Agents **cannot create agents** — no recursive spawning
+- Every creation is logged to `/opt/stan/logs/agent-creation.log` with timestamp and reason
+- Template lives in `/opt/stan/agent-template/`
+
 ## Architecture
 - Root Authority: Claude Code at /opt/stan — Robert's direct interface
 - Orchestrator (STAN): Gemini Flash 2.0 in Docker container — manages agents, runs operations
-- Container Agents: Gemini Flash 2.0 — task execution, scoped functions
+- Container Agents: Gemini Flash 2.0 — task execution, scoped functions (magnus, pete, caesar, maggie, clark, sentry, scout)
+- Agent Template: `/opt/stan/agent-template/` + `create-agent.sh` for dynamic agent spawning
 - Git: https://github.com/Aim67TQ7/stan.git
 
 ## Model Strategy
