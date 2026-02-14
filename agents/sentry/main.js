@@ -116,6 +116,7 @@ function buildTaskData(record, source) {
     user_id: record.user_id || null,
     supabase_record: record,
     _source: source,
+    _conversation_id: record._conversation_id || null,
     _received_at: new Date().toISOString()
   };
 }
