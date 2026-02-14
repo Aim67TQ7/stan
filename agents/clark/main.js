@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { watch } from 'chokidar';
 import { readFile, writeFile, mkdir, rename, readdir, stat } from 'fs/promises';
@@ -17,10 +17,9 @@ const OUTBOX_DIR = path.join(WORKSPACE, 'outbox');
 const PROCESSED_DIR = path.join(OUTBOX_DIR, 'processed');
 const INBOX_PROCESSED_DIR = path.join(WORKSPACE, 'processed');
 
-const WRITABLE_TABLES = ['tasks', 'agent_status', 'agent_activity', 'scheduled_tasks'];
+const WRITABLE_TABLES = ['tasks', 'agent_status', 'agent_activity', 'scheduled_tasks', 'chat_messages'];
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 let supabase = null;
 
@@ -44,6 +43,20 @@ async function log(message) {
   console.log(entry.trim());
 }
 
+async function logUsage(taskType, usage, durationMs) {
+  const usageFile = path.join(LOGS, `usage-${AGENT_NAME}-${new Date().toISOString().split('T')[0]}.jsonl`);
+  const record = {
+    timestamp: new Date().toISOString(),
+    agent: AGENT_NAME,
+    task_type: taskType,
+    prompt_tokens: usage?.prompt_tokens || 0,
+    completion_tokens: usage?.completion_tokens || 0,
+    total_tokens: usage?.total_tokens || 0,
+    duration_ms: durationMs
+  };
+  await writeFile(usageFile, JSON.stringify(record) + '\n', { flag: 'a' }).catch(() => {});
+}
+
 async function loadSkills() {
   try {
     const registry = JSON.parse(await readFile('/app/skills/registry.json', 'utf-8'));
@@ -60,7 +73,7 @@ function startHealthServer() {
         status: 'ok',
         last_task_at: lastTaskAt,
         current_task: currentTask,
-        api_key_valid: !!process.env.GEMINI_API_KEY,
+        api_key_valid: !!process.env.GROQ_API_KEY,
         supabase_connected: !!supabase,
         loaded_skills: loadedSkills,
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000)
@@ -171,7 +184,7 @@ async function syncAgentStatus(statusData) {
 
     for (const [agentName, health] of Object.entries(agents)) {
       const record = {
-        agent_name: agentName,
+        agent_name: agentName.toUpperCase(),
         status: health.status || 'unknown',
         last_heartbeat: now,
         last_task_at: health.last_task_at || null,
@@ -235,7 +248,7 @@ async function pollScheduledTasks() {
       .from('scheduled_tasks')
       .select('*')
       .eq('enabled', true)
-      .lte('next_run', now);
+      .lte('next_run_at', now);
 
     if (error) {
       await log(`SCHEDULER ERROR: ${error.message}`);
@@ -267,8 +280,8 @@ async function pollScheduledTasks() {
       // Compute next run and update record
       const nextRun = computeNextRun(scheduled.schedule);
       await supabase.from('scheduled_tasks').update({
-        last_run: now,
-        next_run: nextRun,
+        last_run_at: now,
+        next_run_at: nextRun,
         updated_at: now
       }).eq('id', scheduled.id);
 
@@ -295,21 +308,32 @@ function startScheduler() {
 
 // --- Outbox Watcher (sync results back to Supabase) ---
 
-async function resolveTaskId(result) {
+async function resolveTaskContext(result) {
+  const ctx = { taskId: null, conversationId: null, userId: null, source: null };
+
   // 1. Direct task_id in result
-  if (result.task_id) return result.task_id;
+  if (result.task_id) ctx.taskId = result.task_id;
 
   // 2. Look up the processed inbox file by task_source filename
   const sourceFile = result.task_source;
-  if (!sourceFile || sourceFile === 'unknown') return null;
-
-  try {
-    const raw = await readFile(path.join(INBOX_PROCESSED_DIR, sourceFile), 'utf-8');
-    const task = JSON.parse(raw);
-    return task.id || null;
-  } catch {
-    return null;
+  if (sourceFile && sourceFile !== 'unknown') {
+    try {
+      const raw = await readFile(path.join(INBOX_PROCESSED_DIR, sourceFile), 'utf-8');
+      const task = JSON.parse(raw);
+      if (!ctx.taskId) ctx.taskId = task.id || null;
+      ctx.conversationId = task._conversation_id || null;
+      ctx.userId = task.user_id || null;
+      ctx.source = task._source || null;
+    } catch {}
   }
+
+  return ctx;
+}
+
+// Backward compat wrapper
+async function resolveTaskId(result) {
+  const ctx = await resolveTaskContext(result);
+  return ctx.taskId;
 }
 
 const MIME_MAP = {
@@ -391,7 +415,8 @@ async function processOutboxFile(filepath) {
     const raw = await readFile(filepath, 'utf-8');
     const result = JSON.parse(raw);
 
-    const taskId = await resolveTaskId(result);
+    const taskCtx = await resolveTaskContext(result);
+    const taskId = taskCtx.taskId;
 
     if (!taskId) {
       await log(`OUTBOX: No task ID found for ${filename} — skipping Supabase update`);
@@ -452,6 +477,32 @@ async function processOutboxFile(filepath) {
           await log(`OUTBOX: Failed to update task ${taskId}: ${updateErr.message}`);
         } else {
           await log(`OUTBOX: Task ${taskId} updated — status=done, ${updates.length} update(s), deliverable=${updateEntry.deliverable?.type || 'none'}`);
+        }
+
+        // If this task came from chat, write the agent's response as a chat message
+        if (taskCtx.conversationId && taskCtx.userId) {
+          const agentContent = typeof result.result === 'string'
+            ? result.result.slice(0, 8000)
+            : JSON.stringify(result.result).slice(0, 8000);
+
+          const { error: chatErr } = await supabase.from('chat_messages').insert({
+            user_id: taskCtx.userId,
+            conversation_id: taskCtx.conversationId,
+            role: 'agent',
+            content: agentContent,
+            agent: result.agent || 'unknown',
+            task_id: taskId,
+            metadata: {
+              deliverable: updateEntry.deliverable,
+              confidence: result.confidence || null
+            }
+          });
+
+          if (chatErr) {
+            await log(`OUTBOX CHAT: Failed to write chat message: ${chatErr.message}`);
+          } else {
+            await log(`OUTBOX CHAT: Agent response written to chat — conv=${taskCtx.conversationId.slice(0, 8)}, agent=${result.agent}`);
+          }
         }
       }
     }
@@ -537,10 +588,13 @@ async function processTask(task) {
         result = await queryTable(table, task.query || {});
       }
     } else {
+      const _taskStart = Date.now();
       const systemPrompt = await loadSystemPrompt();
       const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what Supabase operations would be needed. If credentials are not configured, explain what would happen once they are.`;
-      const genResult = await model.generateContent(prompt);
-      result = { analysis: genResult.response.text() };
+      const genResult = await groq.chat.completions.create({ messages: [{ role: 'user', content: prompt }], model: 'llama-3.3-70b-versatile' });
+      const _usage = genResult.usage;
+      await logUsage(task.type || 'unknown', _usage, Date.now() - _taskStart);
+      result = { analysis: genResult.choices[0]?.message?.content || '', usage: _usage || null };
     }
 
     // Log activity for completed tasks with user context

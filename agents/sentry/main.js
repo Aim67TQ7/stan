@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import crypto from 'crypto';
+import Groq from 'groq-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { watch } from 'chokidar';
 import { readFile, writeFile, readdir, mkdir } from 'fs/promises';
@@ -14,8 +15,7 @@ const HOOKS_DIR = path.join(AGENT_DIR, 'hooks');
 const CRON_DIR = path.join(AGENT_DIR, 'cron');
 const TASK_FILE = path.join(AGENT_DIR, 'current-task.json');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 let supabase = null;
 
@@ -39,6 +39,20 @@ async function log(message) {
   const logFile = path.join(LOGS, `${AGENT_NAME}-${timestamp.split('T')[0]}.log`);
   await writeFile(logFile, entry, { flag: 'a' }).catch(() => {});
   console.log(entry.trim());
+}
+
+async function logUsage(taskType, usage, durationMs) {
+  const usageFile = path.join(LOGS, `usage-${AGENT_NAME}-${new Date().toISOString().split('T')[0]}.jsonl`);
+  const record = {
+    timestamp: new Date().toISOString(),
+    agent: AGENT_NAME,
+    task_type: taskType,
+    prompt_tokens: usage?.prompt_tokens || 0,
+    completion_tokens: usage?.completion_tokens || 0,
+    total_tokens: usage?.total_tokens || 0,
+    duration_ms: durationMs
+  };
+  await writeFile(usageFile, JSON.stringify(record) + '\n', { flag: 'a' }).catch(() => {});
 }
 
 async function loadSkills() {
@@ -231,6 +245,19 @@ function startWebhookServer(handlers) {
   const app = express();
   app.use(express.json());
 
+  // CORS — allow frontend origins
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    const allowed = ['https://howl.gp3.app', 'https://sentient.gp3.app', 'http://localhost:5173', 'http://localhost:3000'];
+    if (allowed.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
+
   // Supabase tasks table webhook — extracts record and builds routable task
   app.post('/hook/new-task', async (req, res) => {
     const payload = req.body;
@@ -289,17 +316,70 @@ function startWebhookServer(handlers) {
     res.json({ status: 'accepted', hook: hookName });
   });
 
+  // --- Chat message persistence helpers ---
+  async function saveChatMessage({ user_id, conversation_id, role, content, agent, task_id, metadata }) {
+    if (!supabase || !user_id) return null;
+    const { data, error } = await supabase.from('chat_messages').insert({
+      user_id,
+      conversation_id,
+      role,
+      content,
+      agent: agent || null,
+      task_id: task_id || null,
+      metadata: metadata || {}
+    }).select().single();
+    if (error) {
+      await log(`CHAT DB ERROR: ${error.message}`);
+      return null;
+    }
+    return data;
+  }
+
+  // --- Fetch recent conversation context for the LLM ---
+  async function getConversationContext(conversation_id, limit = 20) {
+    if (!supabase || !conversation_id) return [];
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .select('role, content, agent, created_at')
+      .eq('conversation_id', conversation_id)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    if (error || !data) return [];
+    return data;
+  }
+
   // --- Direct Chat with STAN ---
   app.post('/chat/stan', async (req, res) => {
-    const { message, user_id } = req.body;
+    const { message, user_id, conversation_id: clientConvId } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: 'message is required' });
     }
 
-    await log(`CHAT: user=${user_id || 'anon'} — ${message.slice(0, 200)}`);
+    // Use client-provided conversation_id or generate a new one
+    const conversation_id = clientConvId || crypto.randomUUID();
+
+    await log(`CHAT: user=${user_id || 'anon'} conv=${conversation_id.slice(0, 8)} — ${message.slice(0, 200)}`);
+
+    // 1. Persist the user's message immediately
+    await saveChatMessage({
+      user_id,
+      conversation_id,
+      role: 'user',
+      content: message
+    });
 
     try {
+      const _chatStart = Date.now();
+
+      // 2. Load conversation history for context
+      const history = await getConversationContext(conversation_id, 20);
+      const historyBlock = history.length > 1
+        ? '\n\nConversation history:\n' + history.slice(0, -1).map(m =>
+            `${m.role === 'user' ? 'User' : `STAN${m.agent ? ` (via ${m.agent})` : ''}`}: ${m.content}`
+          ).join('\n')
+        : '';
+
       const chatPrompt = `You are STAN (Strategic Tactical Autonomous Node), an AI operations assistant for Bunting Magnetics. You are helpful, concise, and action-oriented. You speak like Radar O'Reilly — you anticipate needs and stay efficient.
 
 You have these agents available:
@@ -311,6 +391,7 @@ You have these agents available:
 - Scout: web research and investigation
 - Oracle: complex reasoning, code review, architecture
 - Sentry: webhooks and scheduling
+${historyBlock}
 
 If the user's message is a TASK (they want something done, created, looked up, drafted, etc.), respond with JSON:
 {"is_task": true, "response": "Brief confirmation of what you're doing", "task": {"type": "keyword", "description": "full task description", "assigned_to": "AGENT_NAME", "priority": "normal"}}
@@ -322,10 +403,12 @@ User message: ${message}
 
 JSON response:`;
 
-      const result = await model.generateContent(chatPrompt);
-      const rawResponse = result.response.text();
+      const result = await groq.chat.completions.create({ messages: [{ role: 'user', content: chatPrompt }], model: 'llama-3.3-70b-versatile' });
+      const rawResponse = result.choices[0]?.message?.content || '';
+      const _chatUsage = result.usage;
+      await logUsage('chat', _chatUsage, Date.now() - _chatStart);
 
-      // Parse the JSON response from Gemini
+      // Parse the JSON response
       let parsed;
       try {
         const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
@@ -342,7 +425,8 @@ JSON response:`;
           assigned_to: (parsed.task.assigned_to || 'ANY').toUpperCase(),
           priority: parsed.task.priority || 'normal',
           user_id: user_id || null,
-          _source: 'chat'
+          _source: 'chat',
+          _conversation_id: conversation_id
         };
 
         // If Supabase is available, create the task there (triggers the pipeline)
@@ -375,21 +459,138 @@ JSON response:`;
 
         await log(`CHAT: Task routed → ${taskRecord.assigned_to}: ${taskRecord.description?.slice(0, 80)}`);
 
+        // 3. Persist STAN's response (with task link)
+        await saveChatMessage({
+          user_id,
+          conversation_id,
+          role: 'assistant',
+          content: parsed.response,
+          agent: 'sentry',
+          task_id: taskRecord.id || null,
+          metadata: { task_created: true, assigned_to: taskRecord.assigned_to, usage: _chatUsage }
+        });
+
         res.json({
           response: parsed.response,
           task_created: true,
           task_id: taskRecord.id || null,
-          assigned_to: taskRecord.assigned_to
+          assigned_to: taskRecord.assigned_to,
+          conversation_id
         });
       } else {
+        // 3. Persist STAN's conversational response
+        await saveChatMessage({
+          user_id,
+          conversation_id,
+          role: 'assistant',
+          content: parsed.response,
+          agent: 'sentry',
+          metadata: { task_created: false, usage: _chatUsage }
+        });
+
         res.json({
           response: parsed.response,
-          task_created: false
+          task_created: false,
+          conversation_id
         });
       }
     } catch (err) {
       await log(`CHAT ERROR: ${err.message}`);
-      res.status(500).json({ error: 'STAN encountered an error processing your message.' });
+
+      // Persist error as system message so the gap is visible
+      await saveChatMessage({
+        user_id,
+        conversation_id,
+        role: 'system',
+        content: 'STAN encountered an error processing this message.',
+        agent: 'sentry',
+        metadata: { error: err.message }
+      });
+
+      res.status(500).json({ error: 'STAN encountered an error processing your message.', conversation_id });
+    }
+  });
+
+  // --- Chat History Retrieval ---
+  app.get('/chat/history', async (req, res) => {
+    const { conversation_id, user_id, limit = 50 } = req.query;
+
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not available' });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    try {
+      let query = supabase
+        .from('chat_messages')
+        .select('id, conversation_id, role, content, agent, task_id, metadata, created_at')
+        .eq('user_id', user_id)
+        .order('created_at', { ascending: true })
+        .limit(parseInt(limit, 10));
+
+      if (conversation_id) {
+        query = query.eq('conversation_id', conversation_id);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      res.json({ messages: data, count: data.length });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- List Conversations ---
+  app.get('/chat/conversations', async (req, res) => {
+    const { user_id, limit = 20 } = req.query;
+
+    if (!supabase || !user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    try {
+      // Get distinct conversations with their latest message
+      const { data, error } = await supabase
+        .rpc('get_user_conversations', { p_user_id: user_id, p_limit: parseInt(limit, 10) })
+        .catch(() => ({ data: null, error: { message: 'RPC not available' } }));
+
+      // Fallback: just get recent messages grouped manually
+      if (error || !data) {
+        const { data: messages, error: msgErr } = await supabase
+          .from('chat_messages')
+          .select('conversation_id, content, role, created_at')
+          .eq('user_id', user_id)
+          .order('created_at', { ascending: false })
+          .limit(200);
+
+        if (msgErr) return res.status(500).json({ error: msgErr.message });
+
+        // Group by conversation_id, take the latest message per conversation
+        const convMap = new Map();
+        for (const msg of messages) {
+          if (!convMap.has(msg.conversation_id)) {
+            convMap.set(msg.conversation_id, {
+              conversation_id: msg.conversation_id,
+              last_message: msg.content?.slice(0, 100),
+              last_role: msg.role,
+              last_at: msg.created_at
+            });
+          }
+        }
+
+        const conversations = [...convMap.values()].slice(0, parseInt(limit, 10));
+        return res.json({ conversations, count: conversations.length });
+      }
+
+      res.json({ conversations: data, count: data.length });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -400,7 +601,7 @@ JSON response:`;
       status: 'ok',
       last_task_at: lastTaskAt,
       current_task: currentTask,
-      api_key_valid: !!process.env.GEMINI_API_KEY,
+      api_key_valid: !!process.env.GROQ_API_KEY,
       supabase_connected: !!supabase,
       loaded_skills: loadedSkills,
       active_crons: activeCrons.length,
@@ -419,17 +620,21 @@ async function processTask(task) {
   await log(`Processing direct task: ${task.type || 'unknown'} — ${task.description || ''}`);
 
   try {
+    const _taskStart = Date.now();
     const systemPrompt = await loadSystemPrompt();
     const prompt = `${systemPrompt}\n\n## Current Task\n${JSON.stringify(task, null, 2)}\n\nAnalyze the task and explain what webhook or cron configuration is needed.`;
 
-    const result = await model.generateContent(prompt);
-    const response = result.response.text();
+    const result = await groq.chat.completions.create({ messages: [{ role: 'user', content: prompt }], model: 'llama-3.3-70b-versatile' });
+    const response = result.choices[0]?.message?.content || '';
+    const _usage = result.usage;
+    await logUsage(task.type || 'unknown', _usage, Date.now() - _taskStart);
 
     const output = {
       agent: AGENT_NAME,
       task_source: task._source_file || 'unknown',
       trigger: 'direct',
       result: response,
+      usage: _usage || null,
       completed_at: new Date().toISOString()
     };
 
