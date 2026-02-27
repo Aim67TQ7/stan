@@ -5,26 +5,26 @@
 **Status:** Active
 
 ## What This Was
-Standalone app or experiment
+DNS and deployment agent — manages Caddy configs and Netlify deploys
 
 ## Current State
-Active — last pushed 2026-02-14. Part of current GP3 platform or active development.
+Active — deployed on Pete VPS
 
 ## Agent Replacement
-**Agent Name:** Stan DNS/Deploy Agent
+**Agent Name:** Stan
 **Lives On:** Pete (187.77.28.22)
 **Orchestrator:** Standalone container
 **Endpoint or Trigger:** http://187.77.28.22:8406
 **Supabase Table:** N/A
 
 ## Handoff Notes
-This repo's core function was: General purpose / unclear. Business context: Standalone app or experiment.
+Core function: Add/remove domains, trigger deploys, manage reverse proxy routing. Context: DNS and deployment agent — manages Caddy configs and Netlify deploys
 
 ## Dependencies
-- None identified from README
+- None identified — check package.json for specifics
 
 ## Last Known Working State
 2026-02-14
 
 ## Claude's Notes
-- WARNING: No README found. Classification based on name/description only.
+- No README existed. Classification based on repo name.
